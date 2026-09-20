@@ -176,9 +176,31 @@ adding a provider is a row in a table, not a new class. Error messages name the
 provider you are actually on, because "OpenAI rejected the key" while you are
 on OpenRouter sends you to the wrong dashboard.
 
-The model list is fetched live from the provider once a key is set, rather than
-hardcoded — OpenRouter alone offers hundreds and no baked-in list stays
-correct.
+### Model lists
+
+Fetched from the provider, never hardcoded. A list baked into the source goes
+stale within weeks: the IDs written here by hand were already wrong when
+checked against the live catalogue.
+
+- **OpenRouter** publishes its catalogue without authentication, so the
+  dropdown fills with all ~370 usable models *before* you paste a key.
+- **Anthropic** and **OpenAI** are listed through their SDKs once a key is set.
+  The Anthropic page object auto-paginates; it is asked for a large page purely
+  to save round trips.
+
+The raw catalogue is not the same as the list of models that can clean up a
+transcript, so it is filtered:
+
+- `:batch` variants are dropped everywhere — they only serve a batch endpoint
+  and reject a synchronous request.
+- For OpenAI, embeddings, speech, image, moderation and realtime models are
+  dropped by name. Excluding known families beats allow-listing, since new chat
+  models appear constantly and an allow-list would hide them. The filter is
+  scoped to OpenAI, so a router that happens to route `openai/gpt-4o-audio`
+  keeps it.
+
+The list is sorted, which groups a router's models by vendor, and the dropdown
+is searchable.
 
 Cleanup is a short rewrite that the whole dictation waits on, so the hosted
 backends are configured for latency rather than depth - low effort, no

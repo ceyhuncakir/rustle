@@ -254,6 +254,11 @@ class FlowWindow(Adw.ApplicationWindow):
         group.add(self.url_row)
 
         self.model_row = Adw.ComboRow(title="Model")
+        # OpenRouter alone lists hundreds; scrolling to one is hopeless.
+        self.model_row.set_enable_search(True)
+        self.model_row.set_expression(
+            Gtk.PropertyExpression.new(Gtk.StringObject, None, "string")
+        )
         self.model_row.connect("notify::selected", self._on_cleanup_model)
         group.add(self.model_row)
 
@@ -304,7 +309,9 @@ class FlowWindow(Adw.ApplicationWindow):
         # list once it answers - OpenRouter alone offers hundreds, and no
         # hardcoded list stays right.
         self._set_models(list(spec.suggested_models), spec)
-        if provider == "ollama" or secrets.get_key(provider):
+        # Fetch whenever we can: locally for Ollama, with a key for the hosted
+        # providers, and without one where the catalogue is public.
+        if provider == "ollama" or spec.public_models_url or secrets.get_key(provider):
             threading.Thread(target=self._fetch_models, args=(provider,),
                              daemon=True).start()
 

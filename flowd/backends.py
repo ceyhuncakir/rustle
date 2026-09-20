@@ -42,6 +42,8 @@ class Provider:
     # Env var checked before the keyring.
     env_var: str | None = None
     note: str = ""
+    # Catalogue readable without authentication, when the provider has one.
+    public_models_url: str | None = None
 
 
 PROVIDERS = {
@@ -62,13 +64,15 @@ PROVIDERS = {
         env_var="OPENAI_API_KEY",
     ),
     "openrouter": Provider(
-        "openrouter", "OpenRouter", True, "deepseek/deepseek-chat",
-        ("deepseek/deepseek-chat", "deepseek/deepseek-reasoner",
-         "qwen/qwen3-14b", "meta-llama/llama-3.3-70b-instruct",
-         "google/gemini-2.5-flash", "mistralai/mistral-small"),
+        # Model IDs here go stale fast - OpenRouter publishes its catalogue
+        # without authentication, so the real list is always fetched and this
+        # is only what shows if the network is down.
+        "openrouter", "OpenRouter", True, "deepseek/deepseek-v4.1-flash",
+        ("deepseek/deepseek-v4.1-flash",),
         base_url="https://openrouter.ai/api/v1",
         env_var="OPENROUTER_API_KEY",
-        note="One key, hundreds of models. The list loads once a key is set.",
+        public_models_url="https://openrouter.ai/api/v1/models",
+        note="Hundreds of models from one key. The full list loads below.",
     ),
     "deepseek": Provider(
         "deepseek", "DeepSeek", True, "deepseek-chat",
@@ -90,6 +94,32 @@ PROVIDERS = {
 
 class BackendError(RuntimeError):
     pass
+
+
+# Substrings that mark a model as unable to answer a chat completion. OpenAI's
+# /v1/models returns its whole catalogue - embeddings, speech, images and
+# moderation included - and offering those as a cleanup model is a guaranteed
+# runtime error. Excluding known families beats allow-listing, because new
+# chat models appear constantly and an allow-list would hide them.
+NON_CHAT_MARKERS = (
+    "embedding", "tts", "whisper", "transcribe", "dall-e", "moderation",
+    "image", "audio", "realtime", "sora", "babbage", "davinci", "search",
+    "computer-use", "codex-mini",
+)
+
+
+def usable_chat_models(ids: list[str], provider: str) -> list[str]:
+    """Drop anything that cannot serve a normal chat completion."""
+    kept = []
+    for model in ids:
+        # ":batch" variants exist only for a provider's batch endpoint and
+        # reject a synchronous request.
+        if model.endswith(":batch"):
+            continue
+        if provider == "openai" and any(m in model.lower() for m in NON_CHAT_MARKERS):
+            continue
+        kept.append(model)
+    return sorted(kept)
 
 
 class OllamaBackend:
@@ -222,7 +252,10 @@ class AnthropicBackend:
 
     def installed_models(self) -> list[str]:
         try:
-            return [m.id for m in self._get_client().models.list()]
+            # SyncPage auto-paginates when iterated, but defaults to 20 per
+            # request; a larger page just means fewer round trips.
+            page = self._get_client().models.list(limit=1000)
+            return sorted(m.id for m in page)
         except Exception:  # noqa: BLE001
             return []
 
@@ -315,11 +348,29 @@ class OpenAICompatibleBackend:
             return False, f"{type(exc).__name__}: {str(exc)[:60]}"
         return True, "ok"
 
-    def installed_models(self) -> list[str]:
+    def _public_models(self, url: str) -> list[str]:
         try:
-            return sorted(m.id for m in self._get_client().models.list())
+            reply = httpx.get(url, timeout=10.0)
+            reply.raise_for_status()
+            return [m["id"] for m in reply.json().get("data", []) if m.get("id")]
         except Exception:  # noqa: BLE001
             return []
+
+    def installed_models(self) -> list[str]:
+        spec = PROVIDERS.get(self.key)
+
+        # A public catalogue means the dropdown can be filled before the user
+        # has pasted a key, which is when they most want to browse it.
+        if spec is not None and spec.public_models_url:
+            found = self._public_models(spec.public_models_url)
+            if found:
+                return usable_chat_models(found, self.key)
+
+        try:
+            found = [m.id for m in self._get_client().models.list()]
+        except Exception:  # noqa: BLE001
+            return []
+        return usable_chat_models(found, self.key)
 
     def warm_up(self) -> float:
         return 0.0

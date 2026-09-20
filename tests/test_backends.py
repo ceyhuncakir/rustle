@@ -229,3 +229,86 @@ def test_round_trips_through_the_real_config_loader(conf):
 
     parsed = tomllib.loads(conf.read_text())
     assert parsed["cleanup"] == {"backend": "anthropic", "model": "claude-opus-5"}
+
+
+# -- model listing ----------------------------------------------------------
+# A provider's catalogue is not a list of things that can clean up a
+# transcript. Offering an embedding model as the cleanup model is a runtime
+# error the user cannot diagnose from the dropdown.
+
+
+def test_openai_non_chat_models_are_excluded():
+    from flowd.backends import usable_chat_models
+
+    catalogue = [
+        "gpt-5", "gpt-5-mini", "gpt-4.1", "o3",
+        "text-embedding-3-large", "tts-1-hd", "whisper-1", "dall-e-3",
+        "omni-moderation-latest", "gpt-4o-audio-preview",
+        "gpt-4o-realtime-preview", "gpt-image-1", "babbage-002",
+        "davinci-002", "computer-use-preview", "codex-mini-latest",
+        "gpt-4o-transcribe", "sora-2",
+    ]
+    kept = usable_chat_models(catalogue, "openai")
+    assert kept == ["gpt-4.1", "gpt-5", "gpt-5-mini", "o3"]
+
+
+def test_batch_variants_are_excluded_for_every_provider():
+    from flowd.backends import usable_chat_models
+
+    ids = ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-pro:batch"]
+    assert usable_chat_models(ids, "openrouter") == ["deepseek/deepseek-v4-pro"]
+    assert usable_chat_models(ids, "custom") == ["deepseek/deepseek-v4-pro"]
+
+
+def test_free_variants_are_kept():
+    from flowd.backends import usable_chat_models
+
+    ids = ["qwen/qwen3-14b:free", "qwen/qwen3-14b"]
+    assert usable_chat_models(ids, "openrouter") == ids[::-1]  # sorted
+
+
+def test_routers_keep_models_whose_names_look_like_openai_extras():
+    """The OpenAI exclusions are name-based, so they must not be applied to a
+    router where "openai/gpt-4o-audio" is simply another routed model."""
+    from flowd.backends import usable_chat_models
+
+    ids = ["openai/gpt-4o-audio-preview", "openai/gpt-5"]
+    assert usable_chat_models(ids, "openrouter") == sorted(ids)
+
+
+def test_listing_is_sorted_so_vendors_group_together():
+    from flowd.backends import usable_chat_models
+
+    ids = ["z-ai/glm", "anthropic/claude-opus-5", "deepseek/x"]
+    assert usable_chat_models(ids, "openrouter") == [
+        "anthropic/claude-opus-5", "deepseek/x", "z-ai/glm",
+    ]
+
+
+def test_openrouter_catalogue_is_declared_public():
+    """It is fetchable without a key, which is what lets the dropdown fill
+    before the user has pasted one."""
+    assert PROVIDERS["openrouter"].public_models_url
+    assert PROVIDERS["openai"].public_models_url is None
+    assert PROVIDERS["anthropic"].public_models_url is None
+
+
+def test_public_listing_needs_no_api_key(monkeypatch):
+    from flowd.backends import OpenAICompatibleBackend
+
+    monkeypatch.setattr("flowd.secrets.get_key", lambda provider: "")
+    backend = OpenAICompatibleBackend("x", "openrouter")
+    monkeypatch.setattr(
+        backend, "_public_models",
+        lambda url: ["b/model", "a/model", "a/model:batch"],
+    )
+    assert backend.installed_models() == ["a/model", "b/model"]
+
+
+def test_listing_never_raises_when_a_provider_is_unreachable(monkeypatch):
+    from flowd.backends import AnthropicBackend, OpenAICompatibleBackend
+
+    monkeypatch.setattr("flowd.secrets.get_key", lambda provider: "")
+    # No key, no network: an empty list, not an exception into the UI thread.
+    assert OpenAICompatibleBackend("x", "openai").installed_models() == []
+    assert AnthropicBackend("x").installed_models() == []
