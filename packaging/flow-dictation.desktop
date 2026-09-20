@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Flow Dictation
+GenericName=Voice Typing
+Comment=Local voice dictation - settings, models and status
+Icon=flow-dictation
+Exec=flow gui
+Terminal=false
+StartupNotify=false
+Categories=Utility;Accessibility;
+Keywords=dictation;dictate;speech;voice;transcribe;stt;whisper;microphone;
+Actions=Start;Stop;
+
+[Desktop Action Start]
+Name=Start Dictation
+Exec=flow start
+
+[Desktop Action Stop]
+Name=Stop Dictation
+Exec=flow stop

@@ -1,0 +1,34 @@
+[project]
+name = "flow-dictation"
+version = "0.2.0"
+description = "Local offline dictation for GNOME Wayland: speak, and cleaned-up text lands in the focused app."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "sounddevice>=0.5.0",
+    "numpy>=1.26",
+    # Parakeet without the NeMo/torch stack: numpy + onnxruntime + hub only.
+    "onnx-asr[hub]>=0.12.0",
+    "httpx>=0.28.0",
+    "typer>=0.15.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+# Pinned below 1.23 for two reasons: newer wheels are built against CUDA 13
+# (this machine has 12.9), and 1.23+ added an external-data path check that
+# rejects HuggingFace's blob cache layout, where model.onnx and its .onnx.data
+# are separate blobs under different directories.
+gpu = ["onnxruntime-gpu>=1.20,<1.23"]
+cpu = ["onnxruntime>=1.20,<1.23"]
+
+[project.scripts]
+flow = "flowd.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "flowd"
+module-root = ""

@@ -1,0 +1,23 @@
+/* The pill. Kept deliberately flat: St has no backdrop-filter, and
+ * Shell.BlurEffect ignores border-radius, so a real frosted-glass pill would
+ * show square blur corners. A dense translucent fill reads better. */
+
+.flow-island {
+    background-color: rgba(17, 19, 27, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 22px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+    padding: 0 16px;
+}
+
+.flow-visualizer {
+    min-width: 72px;
+}
+
+.flow-island-label {
+    color: rgba(236, 239, 244, 0.94);
+    font-size: 13px;
+    font-weight: 500;
+    padding-left: 12px;
+    max-width: 560px;
+}

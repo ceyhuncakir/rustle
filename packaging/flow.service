@@ -1,0 +1,22 @@
+[Unit]
+Description=Flow dictation daemon
+Documentation=https://github.com/ceyhun/flow
+# The daemon is useless without the Shell extension, so it belongs to the
+# graphical session and should go away with it.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/flow run
+Restart=on-failure
+RestartSec=3
+# Loading the model takes a few seconds on a cold cache.
+TimeoutStartSec=300
+Slice=app.slice
+
+[Install]
+# Present so `systemctl --user enable flow` works if you later want Flow to
+# start with the session. Deliberately not enabled by default - Flow is meant
+# to be switched on when you want it.
+WantedBy=graphical-session.target
