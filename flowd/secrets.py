@@ -20,9 +20,14 @@ from gi.repository import Secret  # noqa: E402
 log = logging.getLogger(__name__)
 
 # Env var checked before the keyring, per provider.
+# Kept in step with backends.PROVIDERS by a test; duplicated rather than
+# imported so this module stays free of an import cycle.
 ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "custom": "FLOW_API_KEY",
 }
 
 SCHEMA = Secret.Schema.new(

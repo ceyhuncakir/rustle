@@ -247,6 +247,12 @@ class FlowWindow(Adw.ApplicationWindow):
         )
         group.add(self.provider_row)
 
+        self.url_row = Adw.EntryRow(title="API address")
+        self.url_row.set_text(self.cfg.cleanup.base_url)
+        self.url_row.set_show_apply_button(True)
+        self.url_row.connect("apply", self._on_base_url)
+        group.add(self.url_row)
+
         self.model_row = Adw.ComboRow(title="Model")
         self.model_row.connect("notify::selected", self._on_cleanup_model)
         group.add(self.model_row)
@@ -273,42 +279,72 @@ class FlowWindow(Adw.ApplicationWindow):
         return group
 
     def _refresh_provider(self, provider: str) -> None:
-        """Show the models and the key field that this provider needs."""
+        """Show the fields this provider needs, and its models."""
         spec = PROVIDERS[provider]
-        needs_key = spec.needs_api_key
-        self.key_row.set_visible(needs_key)
+        self.provider_row.set_subtitle(spec.note)
+        self.key_row.set_visible(spec.needs_api_key)
+        self.url_row.set_visible(provider == "custom")
         self.model_row.set_visible(provider != "none")
 
-        if needs_key:
-            source = secrets.key_source(provider)
+        if spec.needs_api_key:
             self.key_row.set_title(f"{spec.label} API key")
+            source = secrets.key_source(provider)
             if source.startswith("$"):
                 self.key_row.set_visible(False)
-                self._toast(f"Using the key from {source}")
+                self.provider_row.set_subtitle(f"Using the key from {source}")
             else:
+                was, self._loading = self._loading, True
                 self.key_row.set_text(secrets.get_key(provider))
+                self._loading = was
 
         if provider == "none":
             return
 
-        choices = list(spec.suggested_models)
-        if provider == "ollama":
-            installed = OllamaBackend(spec.default_model, self.cfg.cleanup.endpoint).installed_models()
-            if installed:
-                choices = installed
-        if self.cfg.cleanup.model not in choices:
-            choices = [self.cfg.cleanup.model, *choices] if self.cfg.cleanup.model else choices
+        # Show something immediately, then replace it with the provider's own
+        # list once it answers - OpenRouter alone offers hundreds, and no
+        # hardcoded list stays right.
+        self._set_models(list(spec.suggested_models), spec)
+        if provider == "ollama" or secrets.get_key(provider):
+            threading.Thread(target=self._fetch_models, args=(provider,),
+                             daemon=True).start()
+
+    def _set_models(self, choices: list[str], spec) -> None:
+        current = self.cfg.cleanup.model
+        if current and current not in choices:
+            choices = [current, *choices]
+        if not choices:
+            choices = [spec.default_model or ""]
 
         self.model_keys = choices
-        was = self._loading
-        self._loading = True
+        was, self._loading = self._loading, True
         self.model_row.set_model(Gtk.StringList.new(choices))
-        if self.cfg.cleanup.model in choices:
-            self.model_row.set_selected(choices.index(self.cfg.cleanup.model))
-        self.model_row.set_subtitle(
-            "Installed locally" if provider == "ollama" else "Runs in the cloud"
-        )
+        if current in choices:
+            self.model_row.set_selected(choices.index(current))
         self._loading = was
+
+    def _fetch_models(self, provider: str) -> None:
+        """Ask the provider what it actually offers. Off the UI thread: this
+        is a network call for everything except Ollama."""
+        from .backends import build_backend
+
+        cfg = Config.load().cleanup
+        cfg.backend = provider
+        try:
+            found = build_backend(cfg).installed_models()
+        except Exception:  # noqa: BLE001 - a provider that will not answer is
+            found = []      # not an error worth interrupting the user for
+
+        if not found or provider != self.provider_keys[self.provider_row.get_selected()]:
+            return
+        GLib.idle_add(self._apply_fetched_models, found, provider)
+
+    def _apply_fetched_models(self, found: list[str], provider: str) -> bool:
+        self._set_models(found, PROVIDERS[provider])
+        self.model_row.set_subtitle(
+            f"{len(found)} available"
+            + (" locally" if provider == "ollama" else " from this provider")
+        )
+        return GLib.SOURCE_REMOVE
 
     def _on_provider(self, row, _p) -> None:
         if self._loading:
@@ -333,6 +369,12 @@ class FlowWindow(Adw.ApplicationWindow):
         self.cfg.cleanup.model = model
         self._needs_restart()
 
+    def _on_base_url(self, row) -> None:
+        set_value("cleanup", "base_url", row.get_text().strip())
+        self.cfg.cleanup.base_url = row.get_text().strip()
+        self._refresh_provider("custom")
+        self._needs_restart()
+
     def _on_api_key(self, row) -> None:
         provider = self.provider_keys[self.provider_row.get_selected()]
         key = row.get_text().strip()
@@ -341,8 +383,12 @@ class FlowWindow(Adw.ApplicationWindow):
             self._toast("API key removed")
             return
         # Keys go to the GNOME keyring, never into config.toml.
-        self._toast("Saved to the keyring" if secrets.set_key(provider, key)
-                    else "Could not write to the keyring")
+        if secrets.set_key(provider, key):
+            self._toast("Saved to the keyring")
+            threading.Thread(target=self._fetch_models, args=(provider,),
+                             daemon=True).start()
+        else:
+            self._toast("Could not write to the keyring")
         self._needs_restart()
 
     def _on_style(self, row, _p) -> None:

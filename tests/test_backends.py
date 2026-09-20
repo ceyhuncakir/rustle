@@ -24,9 +24,40 @@ def test_every_provider_is_described():
     for key, spec in PROVIDERS.items():
         assert spec.key == key
         assert spec.label
-        if key != "none":
-            assert spec.default_model
-            assert spec.default_model in spec.suggested_models
+        # "none" has no model, and "custom" cannot have one - the user brings
+        # their own endpoint. Everything else must offer its default.
+        if spec.default_model:
+            assert spec.default_model in spec.suggested_models, key
+
+
+def test_custom_provider_has_no_preset_model_or_url():
+    """It is the escape hatch: the user supplies both."""
+    spec = PROVIDERS["custom"]
+    assert spec.needs_api_key
+    assert not spec.default_model
+    assert spec.base_url is None
+
+
+def test_routers_carry_a_base_url():
+    for key in ("openrouter", "deepseek"):
+        assert PROVIDERS[key].base_url.startswith("https://"), key
+        assert PROVIDERS[key].needs_api_key
+
+
+def test_openai_uses_the_sdk_default_address():
+    assert PROVIDERS["openai"].base_url is None
+
+
+def test_env_vars_match_the_provider_catalogue():
+    """secrets duplicates this mapping to avoid an import cycle, so drift is
+    caught here rather than by a key silently not being found."""
+    from flowd import secrets
+
+    for key, spec in PROVIDERS.items():
+        if spec.needs_api_key:
+            assert secrets.ENV_VARS.get(key) == spec.env_var, key
+        else:
+            assert key not in secrets.ENV_VARS, key
 
 
 def test_hosted_providers_need_a_key_and_local_ones_do_not():
@@ -39,18 +70,50 @@ def test_hosted_providers_need_a_key_and_local_ones_do_not():
 @pytest.mark.parametrize(
     "backend,expected",
     [("ollama", OllamaBackend), ("anthropic", AnthropicBackend),
-     ("openai", OpenAIBackend), ("none", OllamaBackend)],
+     ("openai", OpenAIBackend), ("openrouter", OpenAIBackend),
+     ("deepseek", OpenAIBackend), ("custom", OpenAIBackend),
+     ("none", OllamaBackend)],
 )
 def test_build_backend_picks_the_right_class(backend, expected):
     cfg = CleanupConfig(backend=backend, model="x")
     assert isinstance(build_backend(cfg), expected)
 
 
+@pytest.mark.parametrize(
+    "backend,url",
+    [("openrouter", "https://openrouter.ai/api/v1"),
+     ("deepseek", "https://api.deepseek.com"),
+     ("openai", None)],
+)
+def test_named_providers_get_their_own_address(backend, url):
+    assert build_backend(CleanupConfig(backend=backend, model="x")).base_url == url
+
+
+def test_custom_provider_uses_the_configured_address():
+    cfg = CleanupConfig(backend="custom", model="m",
+                        base_url="http://127.0.0.1:8000/v1")
+    assert build_backend(cfg).base_url == "http://127.0.0.1:8000/v1"
+
+
+def test_custom_provider_without_an_address_says_so(monkeypatch):
+    monkeypatch.setattr("flowd.secrets.get_key", lambda provider: "sk-test")
+    backend = build_backend(CleanupConfig(backend="custom", model="m"))
+    ok, why = backend.available()
+    assert not ok and "base URL" in why
+    with pytest.raises(BackendError, match="base URL"):
+        backend.complete("s", "p", 5.0)
+
+
 def test_hosted_backends_fail_clearly_without_a_key(monkeypatch):
     # A missing key must say so, not surface as a timeout or a stack trace.
     monkeypatch.setattr("flowd.secrets.get_key", lambda provider: "")
 
-    for backend in (AnthropicBackend("claude-opus-5"), OpenAIBackend("gpt-5")):
+    for backend in (
+        AnthropicBackend("claude-opus-5"),
+        OpenAIBackend("gpt-5", "openai"),
+        OpenAIBackend("deepseek/deepseek-chat", "openrouter"),
+        OpenAIBackend("deepseek-chat", "deepseek"),
+    ):
         ok, why = backend.available()
         assert not ok and "key" in why.lower()
         with pytest.raises(BackendError, match="API key"):
@@ -64,7 +127,18 @@ def test_unreachable_ollama_reports_unavailable():
 
 def test_hosted_backends_are_always_warm():
     assert AnthropicBackend("claude-opus-5").warm_up() == 0.0
-    assert OpenAIBackend("gpt-5").warm_up() == 0.0
+    assert OpenAIBackend("gpt-5", "openai").warm_up() == 0.0
+    assert OpenAIBackend("x", "openrouter").warm_up() == 0.0
+
+
+def test_error_messages_name_the_provider(monkeypatch):
+    """"OpenAI rejected the key" when you are on OpenRouter sends you to the
+    wrong dashboard."""
+    monkeypatch.setattr("flowd.secrets.get_key", lambda provider: "")
+    with pytest.raises(BackendError, match="OpenRouter"):
+        OpenAIBackend("x", "openrouter").complete("s", "p", 5.0)
+    with pytest.raises(BackendError, match="DeepSeek"):
+        OpenAIBackend("x", "deepseek").complete("s", "p", 5.0)
 
 
 def test_cleaner_failure_falls_back_to_the_raw_transcript(monkeypatch):

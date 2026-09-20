@@ -47,6 +47,9 @@ class CleanupConfig:
     backend: str = "ollama"
     model: str = "qwen3:14b"
     endpoint: str = "http://localhost:11434"
+    # Only for backend = "custom": the address of an OpenAI-compatible API.
+    # The named providers carry their own.
+    base_url: str = ""
     timeout: float = 20.0
     # How long Ollama keeps the model in VRAM after a request. Loading a 14B
     # model costs ~40s, so an idle timeout mid-session is a brutal first
@@ -146,11 +149,19 @@ provider = "auto"      # auto | cuda | cpu
 [cleanup]
 enabled = true
 # Where the cleanup model runs.
-#   ollama    - local, offline, free, nothing leaves this machine
-#   anthropic - Claude via the official SDK  (key in the GNOME keyring)
-#   openai    - GPT via the official SDK     (key in the GNOME keyring)
-#   none      - paste the raw transcript, no cleanup
+#   ollama     - local, offline, free, nothing leaves this machine
+#   anthropic  - Claude
+#   openai     - GPT
+#   openrouter - one key, hundreds of models including DeepSeek
+#   deepseek   - DeepSeek directly
+#   custom     - any OpenAI-compatible endpoint; set base_url below
+#   none       - paste the raw transcript, no cleanup
+# API keys live in the GNOME keyring, never here. Set them in `flow gui`,
+# or export the provider's environment variable.
 backend = "ollama"
+
+# Only used when backend = "custom".
+base_url = ""
 model = "qwen3:14b"
 endpoint = "http://localhost:11434"
 timeout = 20.0

@@ -162,10 +162,23 @@ The model that cleans up your transcript is a dropdown:
 
 | Provider | Notes |
 |---|---|
-| **Ollama** (default) | Local, offline, free. Nothing leaves the machine. Lists the models you have actually pulled. |
+| **Ollama** (default) | Local, offline, free. Nothing leaves the machine. |
 | **Anthropic** | Claude, via the official SDK. |
-| **OpenAI** | GPT, via the official SDK. |
+| **OpenAI** | GPT. |
+| **OpenRouter** | One key, hundreds of models — DeepSeek, Qwen, Llama, Gemini, Mistral. |
+| **DeepSeek** | DeepSeek directly, if you would rather not go through a router. |
+| **Other** | Any OpenAI-compatible endpoint: Groq, Together, Fireworks, vLLM, llama.cpp, LM Studio. Supply the address. |
 | **None** | Paste the raw transcript, no cleanup. |
+
+Everything except Ollama and Anthropic speaks the OpenAI protocol, so they
+share one implementation and differ only by base URL and which key opens them —
+adding a provider is a row in a table, not a new class. Error messages name the
+provider you are actually on, because "OpenAI rejected the key" while you are
+on OpenRouter sends you to the wrong dashboard.
+
+The model list is fetched live from the provider once a key is set, rather than
+hardcoded — OpenRouter alone offers hundreds and no baked-in list stays
+correct.
 
 Cleanup is a short rewrite that the whole dictation waits on, so the hosted
 backends are configured for latency rather than depth - low effort, no

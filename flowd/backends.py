@@ -34,8 +34,14 @@ class Provider:
     label: str
     needs_api_key: bool
     default_model: str
-    # Offered in the GUI when the provider cannot be queried for a live list.
+    # Offered in the GUI before a key is set. Once there is one, the live
+    # /models endpoint replaces this, so it only has to be a starting point.
     suggested_models: tuple[str, ...]
+    # Set for anything speaking the OpenAI protocol at a non-OpenAI address.
+    base_url: str | None = None
+    # Env var checked before the keyring.
+    env_var: str | None = None
+    note: str = ""
 
 
 PROVIDERS = {
@@ -43,16 +49,42 @@ PROVIDERS = {
         "ollama", "Ollama (local)", False, "qwen3:14b",
         ("qwen3:14b", "qwen3:8b", "qwen3:4b", "llama3.1:8b", "mistral-nemo:12b",
          "gemma3:12b", "phi4:14b"),
+        note="Runs on this machine. Nothing leaves it.",
     ),
     "anthropic": Provider(
         "anthropic", "Anthropic Claude", True, "claude-opus-5",
         ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"),
+        env_var="ANTHROPIC_API_KEY",
     ),
     "openai": Provider(
         "openai", "OpenAI", True, "gpt-5",
         ("gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"),
+        env_var="OPENAI_API_KEY",
     ),
-    "none": Provider("none", "No cleanup (raw transcript)", False, "", ()),
+    "openrouter": Provider(
+        "openrouter", "OpenRouter", True, "deepseek/deepseek-chat",
+        ("deepseek/deepseek-chat", "deepseek/deepseek-reasoner",
+         "qwen/qwen3-14b", "meta-llama/llama-3.3-70b-instruct",
+         "google/gemini-2.5-flash", "mistralai/mistral-small"),
+        base_url="https://openrouter.ai/api/v1",
+        env_var="OPENROUTER_API_KEY",
+        note="One key, hundreds of models. The list loads once a key is set.",
+    ),
+    "deepseek": Provider(
+        "deepseek", "DeepSeek", True, "deepseek-chat",
+        ("deepseek-chat", "deepseek-reasoner"),
+        base_url="https://api.deepseek.com",
+        env_var="DEEPSEEK_API_KEY",
+    ),
+    "custom": Provider(
+        "custom", "Other (OpenAI-compatible)", True, "",
+        (),
+        env_var="FLOW_API_KEY",
+        note="Any OpenAI-compatible endpoint: Groq, Together, Fireworks, "
+             "vLLM, llama.cpp, LM Studio.",
+    ),
+    "none": Provider("none", "No cleanup (raw transcript)", False, "", (),
+                     note="Paste the transcript exactly as recognised."),
 }
 
 
@@ -201,26 +233,44 @@ class AnthropicBackend:
         pass
 
 
-class OpenAIBackend:
-    """GPT through the official SDK."""
+class OpenAICompatibleBackend:
+    """Anything speaking the OpenAI protocol.
 
-    key = "openai"
+    OpenAI itself, but also OpenRouter, DeepSeek, Groq, Together, vLLM,
+    llama.cpp and LM Studio - they differ only by base URL and which key opens
+    them. One implementation covers the lot, so adding a provider is a row in
+    PROVIDERS rather than a new class.
+    """
 
-    def __init__(self, model: str = "gpt-5") -> None:
+    def __init__(self, model: str, provider: str = "openai",
+                 base_url: str | None = None) -> None:
         self.model = model
+        self.key = provider
+        self.base_url = base_url or (PROVIDERS[provider].base_url
+                                     if provider in PROVIDERS else None)
         self._client = None
+
+    @property
+    def _label(self) -> str:
+        return PROVIDERS[self.key].label if self.key in PROVIDERS else self.key
 
     def _get_client(self):
         if self._client is None:
             import openai
 
-            api_key = secrets.get_key("openai")
+            api_key = secrets.get_key(self.key)
             if not api_key:
+                env = PROVIDERS[self.key].env_var if self.key in PROVIDERS else None
                 raise BackendError(
-                    "no OpenAI API key - set one in the settings window, "
-                    "or export OPENAI_API_KEY"
+                    f"no {self._label} API key - set one in the settings "
+                    f"window" + (f", or export {env}" if env else "")
                 )
-            self._client = openai.OpenAI(api_key=api_key)
+            if self.key == "custom" and not self.base_url:
+                raise BackendError(
+                    "no base URL set - a custom provider needs the address of "
+                    "its OpenAI-compatible endpoint"
+                )
+            self._client = openai.OpenAI(api_key=api_key, base_url=self.base_url)
         return self._client
 
     def complete(self, system: str, prompt: str, timeout: float,
@@ -238,19 +288,27 @@ class OpenAIBackend:
                 ],
             )
         except openai.AuthenticationError as exc:
-            raise BackendError("OpenAI rejected the API key") from exc
+            raise BackendError(f"{self._label} rejected the API key") from exc
         except openai.RateLimitError as exc:
-            raise BackendError("OpenAI rate limit reached") from exc
+            raise BackendError(f"{self._label} rate limit reached") from exc
+        except openai.NotFoundError as exc:
+            raise BackendError(f"{self._label} has no model {self.model!r}") from exc
         except openai.APIStatusError as exc:
-            raise BackendError(f"OpenAI error {exc.status_code}") from exc
+            raise BackendError(f"{self._label} error {exc.status_code}") from exc
         except openai.APIConnectionError as exc:
-            raise BackendError("could not reach OpenAI") from exc
+            raise BackendError(f"could not reach {self._label}") from exc
 
-        return response.choices[0].message.content or ""
+        choice = response.choices[0].message
+        text = choice.content or ""
+        # Reasoning models on some routers return the answer alongside a
+        # separate reasoning field; only the answer should be pasted.
+        return text.strip()
 
     def available(self) -> tuple[bool, str]:
-        if not secrets.get_key("openai"):
+        if not secrets.get_key(self.key):
             return False, "no API key set"
+        if self.key == "custom" and not self.base_url:
+            return False, "no base URL set"
         try:
             self._get_client().models.retrieve(self.model)
         except Exception as exc:  # noqa: BLE001
@@ -270,11 +328,18 @@ class OpenAIBackend:
         pass
 
 
+# Kept as a name because "the OpenAI backend" is what callers ask for.
+OpenAIBackend = OpenAICompatibleBackend
+
+
 def build_backend(config):
     """Construct the backend named in the config."""
     backend = config.backend
     if backend == "anthropic":
         return AnthropicBackend(config.model)
-    if backend == "openai":
-        return OpenAIBackend(config.model)
+    if backend in PROVIDERS and PROVIDERS[backend].needs_api_key:
+        return OpenAICompatibleBackend(
+            config.model, backend,
+            getattr(config, "base_url", "") or PROVIDERS[backend].base_url,
+        )
     return OllamaBackend(config.model, config.endpoint, config.keep_alive)
