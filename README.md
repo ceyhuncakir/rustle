@@ -29,9 +29,9 @@ where:
 |---|---|
 | Linux, GNOME Wayland | **Works.** The Shell extension draws the island and delivers the hotkey; the app talks to it over D-Bus. Daily-driver tested. |
 | Linux, X11 | Built, not yet verified on a real session. GNOME on X11 uses the extension when it runs. |
-| Linux, KDE / Hyprland / other Wayland | Built without a global hotkey yet; pasting needs `dotool` or `ydotool`. Planned for a later milestone. |
-| Windows | Built through CI, not yet verified on a machine. |
-| macOS | Built through CI, not yet verified on a machine; non-activating panel and permission prompts still to come. |
+| Linux, KDE / Hyprland / other Wayland | Built. The shortcut comes from the desktop's shortcut portal (tried on GNOME's) or from compositor key bindings; the island is a layer-shell overlay (tried in sway); pasting needs `dotool` or `ydotool`. Not yet verified on a real KDE or wlroots session. |
+| Windows | Built through CI, not yet verified on a machine. The island stays on top without taking focus. |
+| macOS | Built through CI, not yet verified on a machine. The island is a non-activating panel; the wizard checks and requests Accessibility. |
 
 Every crate's tests, the recognition parity suite and the 28-case cleanup
 evaluation pass on the Linux development machine.
@@ -85,6 +85,33 @@ scripts/install-ollama.sh         # rootless Ollama + qwen3:14b
 
 or pick a cloud provider in the settings window. API keys go in the system
 keyring, never in the config file.
+
+### KDE, Hyprland, sway and other Wayland desktops
+
+The app asks the desktop's shortcut portal for the dictation shortcut; KDE
+and Hyprland show their own dialog to confirm it once, and the key you
+pick there is the one Flow shows. Where the portal has no shortcuts
+(sway, river, niri), bind keys in the compositor to `flow hotkey`, which
+talks to the running app:
+
+```sh
+# sway: hold to talk
+bindsym --no-repeat Ctrl+Alt+space exec flow hotkey down
+bindsym --release Ctrl+Alt+space exec flow hotkey up
+# Hyprland
+bind = CTRL ALT, space, exec, flow hotkey down
+bindr = CTRL ALT, space, exec, flow hotkey up
+# river
+riverctl map normal Control+Alt Space spawn 'flow hotkey down'
+riverctl map -release normal Control+Alt Space spawn 'flow hotkey up'
+# niri (press only, so tap to start and tap to stop)
+Mod+Space repeat=false { spawn "flow" "hotkey" "toggle"; }
+```
+
+`flow hotkey cancel` drops the take in progress. The island needs
+`gtk-layer-shell` (`libgtk-layer-shell0` on Debian and Ubuntu) to float
+above windows without taking focus; without it Flow uses a plain window.
+Pasting needs `dotool`, or `ydotool` with its `ydotoold` service running.
 
 ### Windows and macOS
 
@@ -146,6 +173,7 @@ flow                     the tray app (first launch opens the setup wizard)
 flow --headless          engine only, for the GNOME user service
 flow doctor              check every moving part
 flow dictate -s 5        record five seconds, recognise, clean, paste
+flow hotkey down|up|toggle|cancel   drive the running app from a key binding
 flow context             what the desktop reports as the focused app
 flow devices             microphones
 flow gpu                 graphics cards, and whether recognition can use one
@@ -212,11 +240,20 @@ own history before it is kept, and `flow vocab --forget` blocks a term for
 good. While learning is off, nothing you dictate is stored. What you
 dictate never goes to the log either, unless you ask for it with `-v`.
 
+## Updates
+
+Installed from a release, Flow checks GitHub once a day and tells you when
+a newer version is out (Settings → Updates, where you can also turn this
+off). The AppImage, Windows and macOS builds update themselves; .deb and
+.rpm installs link to the releases page. Every update is checked against
+Flow's signing key before it is installed. Maintainers: see
+[docs/releasing.md](docs/releasing.md).
+
 ## Development
 
 ```sh
 pnpm install
-cargo test --workspace                     # 200+ tests, no models needed
+cargo test --workspace                     # 300+ tests, no models needed
 pnpm tauri dev -- --features webgpu        # the app, with GPU recognition (or cuda)
 cargo run -p flow-desktop --example island # drive the live GNOME island over D-Bus
 scripts/nested-shell.sh                    # a throwaway GNOME Shell for extension work

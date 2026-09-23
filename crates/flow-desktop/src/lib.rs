@@ -53,6 +53,10 @@ pub enum HotkeySource {
     /// The app must register this combination with its global-shortcut
     /// plugin and forward press/release as `HotkeyEvent::Down` / `Up`.
     AppShortcut(String),
+    /// Nothing here grabs a key for us, but the desktop's own key bindings
+    /// can run `flow hotkey ...`, which reaches the engine through the
+    /// control socket. The text says how to set that up.
+    External(String),
     /// Nothing on this desktop can deliver a global hotkey to us.
     Unsupported(String),
 }

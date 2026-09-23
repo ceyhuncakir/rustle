@@ -1,5 +1,5 @@
 import { api, type ComputeReport, type GpuReport } from "../../shared/api";
-import { detach, useAsync } from "../../shared/hooks";
+import { detach, useAsync, useInterval } from "../../shared/hooks";
 import { DownloadProgress, computePlan, deviceOptions, formatMegabytes, providerChoice, useModelDownload } from "../../shared/prefs";
 import { Button, ChoiceRow, Group, Row, Select, descriptionOf, useToast, type Choice, type Option } from "../../shared/ui";
 import { useSettings } from "../context";
@@ -12,7 +12,10 @@ const COMPUTE: readonly Choice[] = [
 
 /** What runs now once the model is loaded; before that, what will. */
 function computeSubtitle(report: ComputeReport | null, gpu: GpuReport | null, requested: string): string {
-  if (report?.actual === "cuda" || report?.actual === "webgpu") return `Running on the ${gpu?.gpu ?? "GPU"}`;
+  if (report?.actual === "cuda" || report?.actual === "webgpu") {
+    const running = `Running on the ${gpu?.gpu ?? "GPU"}`;
+    return report.fallback ? `${running} - ${report.fallback}` : running;
+  }
   if (report?.actual === "cpu") return report.reason ? `Running on the CPU - ${report.reason}` : "Running on the CPU";
   if (gpu) return computePlan(gpu, requested).headline;
   return descriptionOf(COMPUTE, providerChoice(requested));
@@ -25,6 +28,8 @@ export function VoiceSection() {
   const models = useAsync(() => api.listSttModels(), [config.stt.provider]);
   const devices = useAsync(() => api.listInputDevices());
   const compute = useAsync(() => api.getComputeReport(), [config.stt.provider]);
+  // The model loads, and the GPU can fail over to the CPU, while this is open.
+  useInterval(() => void compute.reload(), 10_000);
   const gpu = useAsync(() => api.detectGpu());
   const fix = gpu.data && config.stt.provider !== "cpu" ? computePlan(gpu.data, config.stt.provider).fix : null;
 

@@ -9,6 +9,7 @@ import { CleanupSection } from "./sections/Cleanup";
 import { DesktopSection } from "./sections/Desktop";
 import { LearningSection } from "./sections/Learning";
 import { StatusSection } from "./sections/Status";
+import { UpdatesSection } from "./sections/Updates";
 import { VoiceSection } from "./sections/Voice";
 
 export function App() {
@@ -86,6 +87,7 @@ function Settings() {
           <CleanupSection />
           <DesktopSection />
           <LearningSection />
+          <UpdatesSection />
           <AboutSection />
         </main>
       </div>

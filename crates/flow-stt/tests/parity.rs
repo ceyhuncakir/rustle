@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use flow_core::engine::Transcriber;
@@ -75,6 +76,15 @@ struct GoldenFeatures {
     shape: Vec<usize>,
     valid: usize,
     data: Vec<f32>,
+}
+
+/// The tests that may load the model on the GPU, one at a time: each takes
+/// up to 3.4 GB of video memory, and three at once do not fit beside
+/// another program's (a local cleanup model, say); cuDNN then fails the
+/// warm-up with an internal error.
+fn one_gpu_test_at_a_time() -> MutexGuard<'static, ()> {
+    static GPU: Mutex<()> = Mutex::new(());
+    GPU.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -285,6 +295,7 @@ fn features_match_python_preprocessor() {
 #[cfg(any(feature = "cuda", feature = "webgpu"))]
 #[test]
 fn gpu_matches_python_golden_within_tolerance() {
+    let _gpu = one_gpu_test_at_a_time();
     let Some(golden) = setup(Precision::Fp32) else { return };
     if golden.files.values().all(|f| f.cuda.is_none()) {
         println!("skipping: golden.json has no CUDA results");
@@ -334,6 +345,7 @@ fn gpu_matches_python_golden_within_tolerance() {
 #[cfg(any(feature = "cuda", feature = "webgpu"))]
 #[test]
 fn gpu_can_be_switched_off_and_on() {
+    let _gpu = one_gpu_test_at_a_time();
     let Some(golden) = setup(Precision::Fp32) else { return };
     let (name, _) = sorted_files(&golden).into_iter().next().expect("a fixture");
     let (audio, rate) = read_wav(&fixtures_dir().join(name));
@@ -354,6 +366,7 @@ fn gpu_can_be_switched_off_and_on() {
 
 #[test]
 fn auto_provider_loads_something() {
+    let _gpu = one_gpu_test_at_a_time();
     let Some(golden) = setup(Precision::Int8) else { return };
     assert_eq!(golden.model, DEFAULT_STT_MODEL);
     let model = Parakeet::new(&golden.model, "auto");

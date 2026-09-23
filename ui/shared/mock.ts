@@ -19,6 +19,7 @@ import type {
   ProviderSpec,
   Status,
   SttModel,
+  UpdateCheck,
 } from "./api";
 import type { Handler, Unlisten } from "./bridge";
 
@@ -74,7 +75,7 @@ const config: Config = {
     app_rules: {},
   },
   learning: { enabled: false, min_dictations: 15, refresh_every: 25, max_terms: 40 },
-  desktop: { overlay: "auto", hotkey: "Ctrl+Alt+Space", push_to_talk: true },
+  desktop: { overlay: "auto", hotkey: "Ctrl+Alt+Space", push_to_talk: true, check_updates: true },
 };
 
 let running = params.get("running") !== "0";
@@ -89,6 +90,9 @@ const envKeys = new Set<string>(["openrouter"]); // pretend $OPENROUTER_API_KEY 
 const downloaded = new Set<string>(["nemo-parakeet-tdt-0.6b-v3"]);
 let download: DownloadEvent | null = null;
 let cancelDownload = false;
+// `?update=none` (up to date), `package` (a .deb: no self-update) or the
+// default, a newer version this copy can install.
+const updateMode = params.get("update") ?? "install";
 
 const permissions: Permission[] = [
   {
@@ -310,8 +314,13 @@ const commands: Record<string, (args: Args) => unknown> = {
     ].join("\n"),
   check_for_updates: async () => {
     await sleep(800);
-    return { available: false };
+    return updateCheck();
   },
+  install_update: () => {
+    if (!updateCheck().can_install) throw new Error("Flow came from a .deb package. Install the new .deb from the releases page.");
+    void fakeUpdate();
+  },
+  open_release_page: () => void window.open("https://github.com/ceyhuncakir/flow/releases/latest", "_blank"),
 
   list_input_devices: () => devices,
   list_stt_models: () => {
@@ -332,7 +341,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   get_compute_report: () => {
     const requested = config.stt.provider;
     const onGpu = requested === "gpu" || requested === "cuda" || (requested !== "cpu" && gpu.usable);
-    return { requested, actual: onGpu ? "webgpu" : "cpu", reason: "" };
+    return { requested, actual: onGpu ? "webgpu" : "cpu", reason: "", fallback: null };
   },
 
   list_providers: () => providers,
@@ -506,4 +515,30 @@ async function fakeDownload(id: string): Promise<void> {
   }
   downloaded.add(id);
   report({ id, file: "", received: 0, total: 0, done: true, error: null });
+}
+
+function updateCheck(): UpdateCheck {
+  const available = updateMode !== "none";
+  const packaged = updateMode === "package";
+  return {
+    available,
+    current: "0.3.0",
+    version: available ? "0.4.0" : null,
+    notes: available ? "See the changelog for what changed." : null,
+    date: available ? "2026-09-21T10:00:00Z" : null,
+    install: packaged ? "deb" : "appimage",
+    can_install: !packaged,
+    how: packaged ? "Flow came from a .deb package. Install the new .deb from the releases page, or update it the way you installed it." : null,
+    release_url: "https://github.com/ceyhuncakir/flow/releases/latest",
+  };
+}
+
+async function fakeUpdate(): Promise<void> {
+  const total = 96_000_000;
+  for (let received = 0; received < total; received += 8_000_000) {
+    emit("flow:update", { received, total, done: false, error: null });
+    await sleep(150);
+  }
+  emit("flow:update", { received: total, total, done: true, error: null });
+  log("install_update: Flow would restart into 0.4.0 now");
 }

@@ -11,6 +11,11 @@
 //! provider finds them). `auto` goes to the CPU when it says no, or when the
 //! GPU then fails anyway; `gpu` tries regardless and fails with the reason.
 //! Both GPU backends run the fp32 export, like CUDA always has.
+//!
+//! A GPU can also fail later, in the middle of a dictation: out of memory
+//! because another program took it, the device lost, the driver reset. The
+//! take is then finished on the CPU rather than lost (see [`Fallback`]),
+//! with either `provider`.
 
 use std::borrow::Cow;
 use std::mem::ManuallyDrop;
@@ -60,12 +65,16 @@ const SAMPLES_PER_FRAME: usize = 8 * SAMPLE_RATE as usize / 100;
 /// What the recogniser ended up running on, and why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ComputeReport {
-    /// The configured provider: `auto`, `cuda` or `cpu`.
+    /// The configured provider: `auto`, `gpu` (or its old name `cuda`) or `cpu`.
     pub requested: String,
-    /// `cuda` or `cpu`.
+    /// `cuda`, `webgpu` or `cpu`.
     pub actual: String,
-    /// How `actual` came about, including which precision was loaded.
+    /// How `actual` came about, including which precision was loaded, and
+    /// whether the CPU has had to finish takes the GPU failed on.
     pub reason: String,
+    /// What the CPU has had to do for a failing GPU, when anything; also
+    /// part of `reason`, apart so the settings window can show it.
+    pub fallback: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -100,6 +109,10 @@ enum Device {
     Cpu,
     Cuda,
     WebGpu,
+    /// For the tests: the CPU passed off as a GPU (fp32 files, the GPU lock,
+    /// a [`Fallback`]), so a build without a GPU tests the fallback too.
+    #[cfg(test)]
+    FakeGpu,
 }
 
 /// The device this build's GPU backend drives, if it has one.
@@ -117,6 +130,8 @@ impl Device {
             Device::Cpu => "cpu",
             Device::Cuda => "cuda",
             Device::WebGpu => "webgpu",
+            #[cfg(test)]
+            Device::FakeGpu => "fake-gpu",
         }
     }
 }
@@ -161,6 +176,10 @@ struct Loaded {
     /// `[layers, 1, hidden]` of each LSTM state.
     state_shape: [usize; 3],
     report: ComputeReport,
+    /// Which precision was loaded and why, as it ends `report.reason`.
+    files: String,
+    /// On a GPU, what to do when it fails mid-take; `None` on the CPU.
+    fallback: Option<Fallback>,
     /// Last, so it is dropped after the sessions: [`release_runtime`] and
     /// [`free_gpu_context`] wait for every one of these to be gone.
     _live: Live,
@@ -196,6 +215,148 @@ impl Drop for Live {
     }
 }
 
+/// GPU failures in a row after which a recogniser stops trying the GPU
+/// until it is loaded again. One can be bad luck (another program held the
+/// video memory for a moment); after three, every take would pay for a GPU
+/// attempt that fails before the CPU starts.
+const GPU_FAILURES_IN_A_ROW: u32 = 3;
+
+/// What a GPU recogniser does when the GPU fails mid-dictation: the CPU
+/// recognises the failed piece again and the rest of the take, so the take
+/// is not lost, and the next take tries the GPU again. When the device is
+/// gone, or it failed [`GPU_FAILURES_IN_A_ROW`] times, the GPU is given up
+/// on and the CPU takes over ([`Parakeet::settle`]).
+#[derive(Default)]
+struct Fallback {
+    /// A plain CPU recogniser, built the first time the GPU fails (1.4 s and
+    /// about 1.5 to 2 GB of memory with the int8 files on a 24-thread CPU;
+    /// more with fp32) and dropped with the GPU's.
+    cpu: OnceLock<Box<Loaded>>,
+    /// Held while `cpu` is built, so two takes failing at once build one.
+    building: Mutex<()>,
+    failures: Mutex<Failures>,
+    /// For the tests: how the next encoder runs on the GPU go. `Some`
+    /// fails with that error, `None` runs as usual.
+    #[cfg(test)]
+    script: Mutex<std::collections::VecDeque<Option<&'static str>>>,
+}
+
+#[derive(Default)]
+struct Failures {
+    /// Since the GPU last got through a piece.
+    in_a_row: u32,
+    /// Since the model was loaded, and what went wrong the last time.
+    total: u32,
+    last: String,
+    /// Why the GPU was given up on, once it is.
+    given_up: Option<String>,
+}
+
+impl Fallback {
+    fn failures(&self) -> MutexGuard<'_, Failures> {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn given_up(&self) -> bool {
+        self.failures().given_up.is_some()
+    }
+
+    /// The GPU got through a piece.
+    fn ran(&self) {
+        self.failures().in_a_row = 0;
+    }
+
+    /// Count a piece the GPU failed, and give the GPU up when the device is
+    /// gone or it has failed too often in a row. Returns what went wrong.
+    fn failed(&self, error: &anyhow::Error) -> String {
+        // All of it in the log, the node and ONNX Runtime's source line
+        // included; what the kernel said in the report.
+        let whole = format!("{error:#}");
+        let why = tidy_ort_error(&whole);
+        warn!("the GPU failed during dictation, recognising the rest of the take on the CPU: {whole}");
+        let mut failures = self.failures();
+        failures.in_a_row += 1;
+        failures.total += 1;
+        failures.last.clone_from(&why);
+        if failures.given_up.is_none() {
+            let verdict = if device_lost(&whole) {
+                Some(format!("the GPU stopped working during dictation ({why})"))
+            } else if failures.in_a_row >= GPU_FAILURES_IN_A_ROW {
+                Some(format!(
+                    "the GPU failed {} times in a row during dictation (last: {why})",
+                    failures.in_a_row
+                ))
+            } else {
+                None
+            };
+            if let Some(verdict) = verdict {
+                // Said once: no take tries the GPU after this, so none fails on it.
+                warn!("{verdict}; the CPU takes over until the model is loaded again");
+                failures.given_up = Some(verdict);
+            }
+        }
+        why
+    }
+
+    /// What the CPU has had to do for the GPU, for the compute report.
+    fn note(&self) -> Option<String> {
+        let failures = self.failures();
+        if let Some(verdict) = &failures.given_up {
+            return Some(format!("{verdict}, so the CPU takes over"));
+        }
+        match failures.total {
+            0 => None,
+            1 => Some(format!(
+                "the GPU failed once during dictation and the CPU finished that take ({})",
+                failures.last
+            )),
+            n => Some(format!(
+                "the GPU failed {n} times during dictation and the CPU finished those takes (last: {})",
+                failures.last
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    fn scripted_failure(&self) -> Option<&'static str> {
+        self.script.lock().unwrap().pop_front().flatten()
+    }
+}
+
+/// Whether a GPU error means the device is gone for the rest of this
+/// process, rather than a one-off like running out of memory. WebGPU, and
+/// Vulkan, Direct3D 12 and Metal under it, say so of a lost or reset
+/// device; CUDA has "sticky" errors after which every call in the process
+/// fails, and ONNX Runtime quotes them as `cudaGetErrorString` puts them.
+/// A failure missed here costs [`GPU_FAILURES_IN_A_ROW`] tries, not a take.
+fn device_lost(error: &str) -> bool {
+    const SIGNS: &[&str] = &[
+        "device lost",
+        "device was lost",
+        "devicelost",
+        "device removed",
+        "device hung",
+        "device reset",
+        "gpu hang",
+        "an illegal memory access",
+        "unspecified launch failure",
+        "launch timed out",
+        "an illegal instruction",
+        "misaligned address",
+        "hardware stack error",
+        "invalid program counter",
+        "device-side assert",
+        "uncorrectable ecc",
+        "busy or unavailable",
+        "no cuda-capable device",
+        "cuda failure 999",
+        "cudaerrorunknown",
+    ];
+    // VK_ERROR_DEVICE_LOST and DXGI_ERROR_DEVICE_REMOVED read like the rest.
+    let error = error.to_lowercase().replace('_', " ");
+    SIGNS.iter().any(|sign| error.contains(sign))
+}
+
 impl Parakeet {
     /// `provider` is `auto`, `cuda` or `cpu`; it is checked at [`load`](Self::load).
     pub fn new(id: &str, provider: &str) -> Parakeet {
@@ -214,7 +375,7 @@ impl Parakeet {
 
     /// `None` while nothing is loaded.
     pub fn compute_report(&self) -> Option<ComputeReport> {
-        self.read().as_ref().map(|l| l.report.clone())
+        self.read().as_ref().map(Loaded::report)
     }
 
     /// Hand the sessions back, and with them the memory the encoder holds on
@@ -248,7 +409,9 @@ impl Parakeet {
         } else {
             Cow::Owned(dsp::resample(audio, sample_rate, SAMPLE_RATE))
         };
-        let result = self.with_loaded(|loaded| loaded.recognize_long(&audio16))?;
+        let result = self.with_loaded(|loaded| self.recognize_long(loaded, &audio16));
+        self.settle();
+        let result = result?;
         let elapsed = started.elapsed().as_secs_f64();
         let seconds = audio.len() as f64 / sample_rate as f64;
         info!(
@@ -310,6 +473,112 @@ impl Parakeet {
         );
         *slot = Some(loaded);
         Ok(())
+    }
+
+    /// Recognise a take in pieces of at most [`MAX_CHUNK`] cut where it is
+    /// quietest, one after the other, with the tokens joined and their
+    /// frames counted from the start of the whole take. On a GPU, a piece
+    /// that fails is recognised again on the CPU, and so is the rest of the
+    /// take; see [`Fallback`].
+    fn recognize_long(&self, loaded: &Loaded, audio: &[f32]) -> anyhow::Result<Transcription> {
+        // Where the pieces run: the GPU until it fails, then the CPU.
+        let mut on = match &loaded.fallback {
+            Some(fallback) if fallback.given_up() => self
+                .cpu_fallback(fallback)
+                .context("the GPU was given up on, and the CPU could not take over")?,
+            _ => loaded,
+        };
+        let pieces = chunks(audio);
+        if pieces.len() == 1 {
+            return self.recognize_piece(&mut on, audio);
+        }
+        info!(
+            "recognising {:.0} s of audio in {} pieces",
+            audio.len() as f64 / SAMPLE_RATE as f64,
+            pieces.len()
+        );
+        let mut whole = Transcription::default();
+        for piece in pieces {
+            // Rounded, so a token's frame is within one frame of where a
+            // single pass would have put it.
+            let offset = (piece.start + SAMPLES_PER_FRAME / 2) / SAMPLES_PER_FRAME;
+            let part = self.recognize_piece(&mut on, &audio[piece])?;
+            whole.tokens.extend(part.tokens);
+            whole.frames.extend(part.frames.into_iter().map(|f| f + offset));
+        }
+        whole.text = on.vocab.text(&whole.tokens)?.trim().to_string();
+        Ok(whole)
+    }
+
+    /// Recognise one piece on `on`. When that is a GPU and it fails, the
+    /// CPU recognises the piece again, and becomes `on` for the rest of the
+    /// take.
+    fn recognize_piece(&self, on: &mut &Loaded, audio: &[f32]) -> anyhow::Result<Transcription> {
+        let loaded = *on;
+        let Some(fallback) = &loaded.fallback else { return loaded.recognize(audio) };
+        let error = match loaded.recognize(audio) {
+            Ok(part) => {
+                fallback.ran();
+                return Ok(part);
+            }
+            Err(error) => error,
+        };
+        let why = fallback.failed(&error);
+        let cpu = self
+            .cpu_fallback(fallback)
+            .map_err(|e| anyhow!("the GPU failed ({why}), and the CPU could not take over: {e:#}"))?;
+        *on = cpu;
+        cpu.recognize(audio)
+    }
+
+    /// The CPU recogniser `fallback` holds, built now if this is the first
+    /// time it is needed. It is `provider = cpu` exactly, int8 files and
+    /// all, so it recognises exactly what that would. Not while the model
+    /// is being unloaded: a take finishing then must not load another one.
+    fn cpu_fallback<'a>(&self, fallback: &'a Fallback) -> anyhow::Result<&'a Loaded> {
+        if let Some(cpu) = fallback.cpu.get() {
+            return Ok(cpu);
+        }
+        let _building = fallback.building.lock().unwrap_or_else(|e| e.into_inner());
+        // Whoever held the lock before us may have finished the job.
+        if let Some(cpu) = fallback.cpu.get() {
+            return Ok(cpu);
+        }
+        if self.parked.load(Ordering::SeqCst) {
+            return Err(unloaded());
+        }
+        let started = Instant::now();
+        let cpu = self.build_on(Device::Cpu, "standing in for the GPU")?;
+        info!(
+            "loaded {} on cpu in {:.1}s to stand in for the GPU ({})",
+            self.id,
+            started.elapsed().as_secs_f64(),
+            cpu.files
+        );
+        Ok(fallback.cpu.get_or_init(|| Box::new(cpu)))
+    }
+
+    /// After a take: once the GPU was given up on, the CPU recogniser it
+    /// fell back on becomes this one's, and the GPU's sessions are handed
+    /// back with the video memory they hold, which may be just what ran
+    /// out. Until the next load, which tries the GPU again: switching
+    /// dictation off and on also resets CUDA ([`free_gpu_context`]), which
+    /// clears the errors that make it give up.
+    fn settle(&self) {
+        let ready = self.read().as_ref().is_some_and(Loaded::can_hand_over);
+        if !ready {
+            return;
+        }
+        let mut slot = self.loaded.write().unwrap_or_else(|e| e.into_inner());
+        // Asked again under the write lock: another take may have done this
+        // meanwhile, or an unload taken everything.
+        let Some(cpu) = slot.as_mut().and_then(Loaded::hand_over) else { return };
+        let gpu = slot.replace(cpu);
+        drop(slot);
+        // Outside the lock: the GPU's sessions go under the GPU lock, which
+        // another recogniser may be holding.
+        drop(gpu);
+        info!("{} now runs on the CPU", self.id);
     }
 
     fn build(&self) -> anyhow::Result<Loaded> {
@@ -399,7 +668,10 @@ impl Parakeet {
                 requested: self.provider.clone(),
                 actual: device.name().to_string(),
                 reason: format!("{reason}; {note}"),
+                fallback: None,
             },
+            files: note,
+            fallback: (device != Device::Cpu).then(Fallback::default),
             _live: live,
         };
         loaded.warm_up()?;
@@ -435,30 +707,30 @@ impl Loaded {
         Ok(())
     }
 
-    /// [`recognize`](Self::recognize), in pieces of at most [`MAX_CHUNK`]
-    /// cut where it is quietest, one after the other, with the tokens joined
-    /// and their frames counted from the start of the whole take.
-    fn recognize_long(&self, audio: &[f32]) -> anyhow::Result<Transcription> {
-        let pieces = chunks(audio);
-        if pieces.len() == 1 {
-            return self.recognize(audio);
+    /// `report`, and what the CPU has had to do for a failing GPU.
+    fn report(&self) -> ComputeReport {
+        let mut report = self.report.clone();
+        if let Some(note) = self.fallback.as_ref().and_then(Fallback::note) {
+            report.reason = format!("{}; {note}", report.reason);
+            report.fallback = Some(note);
         }
-        info!(
-            "recognising {:.0} s of audio in {} pieces",
-            audio.len() as f64 / SAMPLE_RATE as f64,
-            pieces.len()
-        );
-        let mut whole = Transcription::default();
-        for piece in pieces {
-            // Rounded, so a token's frame is within one frame of where a
-            // single pass would have put it.
-            let offset = (piece.start + SAMPLES_PER_FRAME / 2) / SAMPLES_PER_FRAME;
-            let part = self.recognize(&audio[piece])?;
-            whole.tokens.extend(part.tokens);
-            whole.frames.extend(part.frames.into_iter().map(|f| f + offset));
-        }
-        whole.text = self.vocab.text(&whole.tokens)?.trim().to_string();
-        Ok(whole)
+        report
+    }
+
+    /// Whether this is a GPU that was given up on, with the CPU built to
+    /// take over from it.
+    fn can_hand_over(&self) -> bool {
+        self.fallback.as_ref().is_some_and(|f| f.given_up() && f.cpu.get().is_some())
+    }
+
+    /// The CPU recogniser to take over from this given-up GPU, its report
+    /// saying why.
+    fn hand_over(&mut self) -> Option<Loaded> {
+        let fallback = self.fallback.as_mut()?;
+        let verdict = fallback.failures.get_mut().unwrap_or_else(|e| e.into_inner()).given_up.clone()?;
+        let mut cpu = *fallback.cpu.take()?;
+        cpu.report.reason = format!("{verdict}, so the CPU took over; {}", cpu.files);
+        Some(cpu)
     }
 
     fn recognize(&self, audio: &[f32]) -> anyhow::Result<Transcription> {
@@ -497,6 +769,10 @@ impl Loaded {
     fn encode(&self, features: &Features) -> anyhow::Result<Encoded> {
         let valid_frames = [features.valid as i64];
         let _gpu = gpu_lock(self.device);
+        #[cfg(test)]
+        if let Some(error) = self.fallback.as_ref().and_then(Fallback::scripted_failure) {
+            return Err(anyhow!("{error}").context("running the encoder"));
+        }
         let mut session = lock(&self.encoder, "encoder")?;
         let outputs = session
             .run(ort::inputs![
@@ -626,6 +902,8 @@ fn pick_precision(id: &str, dir: &Path, device: Device) -> anyhow::Result<(Preci
     let (preferred, other) = match device {
         Device::Cpu => (Precision::Int8, Precision::Fp32),
         Device::Cuda | Device::WebGpu => (Precision::Fp32, Precision::Int8),
+        #[cfg(test)]
+        Device::FakeGpu => (Precision::Fp32, Precision::Int8),
     };
     if is_downloaded(id, preferred) {
         return Ok((preferred, format!("{} files", precision_name(preferred))));
@@ -641,12 +919,48 @@ fn pick_precision(id: &str, dir: &Path, device: Device) -> anyhow::Result<(Preci
 /// ONNX Runtime's errors lead with the source location of its own build
 /// (`/home/runner/work/.../provider_bridge_ort.cc:1952 Provider& ...Get()
 /// [ONNXRuntimeError] : 1 : FAIL : Failed to load library ...`); keep the
-/// part after the last ` : `, which says what happened.
+/// part after the last ` : `, which says what happened. A run that failed
+/// names the node and quotes the kernel after `Status Message: `, again
+/// behind a source location and a C++ signature; keep what the kernel said.
 fn tidy_ort_error(message: &str) -> String {
-    match message.rfind("[ONNXRuntimeError]") {
-        Some(at) => message[at..].rsplit(" : ").next().unwrap_or(message).trim().to_string(),
-        None => message.to_string(),
+    let message = match message.rfind("[ONNXRuntimeError]") {
+        Some(at) => message[at..].rsplit(" : ").next().unwrap_or(message).trim(),
+        None => message,
+    };
+    let Some((_, status)) = message.rsplit_once("Status Message: ") else { return message.to_string() };
+    let status = after_source_location(status);
+    // A failed CUDA call ends in " ; GPU=0 ; hostname=... ; file=... ; expr=...".
+    status.split(" ; GPU=").next().unwrap_or(status).trim().to_string()
+}
+
+/// `/src/bfc_arena.cc:358 void *ns::Arena::Alloc(size_t, bool) what happened`
+/// -> `what happened`; anything else as it is.
+fn after_source_location(text: &str) -> &str {
+    let Some((location, rest)) = text.split_once(' ') else { return text };
+    let is_location = location.rsplit_once(':').is_some_and(|(file, line)| {
+        file.contains('.') && !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit())
+    });
+    let Some(open) = rest.find('(').filter(|_| is_location) else { return text };
+    // The signature ends where its argument list closes, bar a trailing
+    // `const` or a template's `[T = float]`.
+    let mut depth = 0usize;
+    for (at, c) in rest[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 1 => {
+                let after = rest[open + at + 1..].trim_start();
+                let after = after.strip_prefix("const").unwrap_or(after).trim_start();
+                let after = match after.strip_prefix('[') {
+                    Some(template) => template.split_once(']').map_or(after, |(_, after)| after),
+                    None => after,
+                };
+                return after.trim_start();
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
     }
+    text
 }
 
 fn precision_name(precision: Precision) -> &'static str {
@@ -676,6 +990,8 @@ fn build_session(path: &Path, device: Device) -> anyhow::Result<Session> {
             .map_err(|e| anyhow!("registering the WebGPU execution provider: {e}"))?,
         #[cfg(not(feature = "webgpu"))]
         Device::WebGpu => bail!("flow-stt was built without the `webgpu` feature"),
+        #[cfg(test)]
+        Device::FakeGpu => builder,
     };
     let started = Instant::now();
     let session = builder.commit_from_file(path).with_context(|| format!("loading {}", path.display()))?;
@@ -819,6 +1135,26 @@ mod tests {
             "Failed to load library libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file"
         );
         assert_eq!(tidy_ort_error("plain error"), "plain error");
+        // What a CUDA arena that ran out mid-take said, word for word.
+        let out_of_memory = "running the encoder: Non-zero status code returned while running Conv node. \
+                             Name:'/pre_encode/conv/conv.0/Conv' Status Message: /home/runner/work/ort-artifacts/\
+                             ort-artifacts/onnxruntime/onnxruntime/core/framework/bfc_arena.cc:358 void \
+                             *onnxruntime::BFCArena::AllocateRawInternal(size_t, bool, Stream *) Available memory \
+                             of 0 is smaller than requested bytes of 1152512";
+        assert_eq!(
+            tidy_ort_error(out_of_memory),
+            "Available memory of 0 is smaller than requested bytes of 1152512"
+        );
+        let cuda = "Status Message: /onnxruntime/core/providers/cuda/cuda_call.cc:129 std::conditional_t<THRW, void, \
+                    Status> onnxruntime::CudaCall(ERRTYPE, const char *, const char *, SUCCTYPE, const char *, const \
+                    char *, int) [ERRTYPE = cudaError, THRW = true, SUCCTYPE = cudaError] CUDA failure 700: an \
+                    illegal memory access was encountered ; GPU=0 ; hostname=box ; file=x.cc ; line=1 ; expr=y;";
+        assert_eq!(tidy_ort_error(cuda), "CUDA failure 700: an illegal memory access was encountered");
+        assert_eq!(tidy_ort_error(OUT_OF_MEMORY), "CUDA failure 2: out of memory");
+        assert_eq!(
+            tidy_ort_error("Status Message: CUDA error cudaErrorLaunchFailure:unspecified launch failure"),
+            "CUDA error cudaErrorLaunchFailure:unspecified launch failure"
+        );
     }
 
     #[test]
@@ -900,5 +1236,251 @@ mod tests {
             let err = p.load().unwrap_err();
             assert!(err.to_string().contains("no GPU support"), "{err}");
         }
+    }
+
+    /// What ONNX Runtime says when the GPU runs out of memory mid-run.
+    const OUT_OF_MEMORY: &str = "[ONNXRuntimeError] : 6 : RUNTIME_EXCEPTION : Non-zero status code returned \
+                                 while running MatMul node. Status Message: CUDA failure 2: out of memory";
+
+    #[test]
+    fn a_lost_gpu_is_told_from_one_that_ran_out_of_memory() {
+        for lost in [
+            "Status Message: CUDA failure 700: an illegal memory access was encountered ; GPU=0 ; expr=cudaStreamSynchronize",
+            "CUDA error cudaErrorLaunchFailure:unspecified launch failure",
+            "CUDA failure 999: unknown error",
+            "WebGPU device lost (2): Device was lost.",
+            "vkQueueSubmit failed with VK_ERROR_DEVICE_LOST",
+            "DXGI_ERROR_DEVICE_REMOVED",
+        ] {
+            assert!(device_lost(lost), "{lost}");
+        }
+        for one_off in [
+            OUT_OF_MEMORY,
+            "Failed to allocate memory for requested buffer of size 1048576",
+            "CUBLAS failure 3: CUBLAS_STATUS_ALLOC_FAILED",
+            "running the encoder: unexpected outputs shape [1, 2]",
+        ] {
+            assert!(!device_lost(one_off), "{one_off}");
+        }
+    }
+
+    /// The tests that load the model, one at a time: each holds up to
+    /// three recognisers, one of them on the GPU.
+    fn one_model_test_at_a_time() -> MutexGuard<'static, ()> {
+        static MODEL: Mutex<()> = Mutex::new(());
+        let _ = env_logger::builder().is_test(true).try_init();
+        MODEL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/stt")
+    }
+
+    /// A fixture's samples and sample rate, or `None` (saying why) when it
+    /// or the model is not on disk.
+    fn fixture(name: &str) -> Option<(Vec<f32>, u32)> {
+        let id = flow_core::models::DEFAULT_STT_MODEL;
+        if !is_downloaded(id, Precision::Int8) && !is_downloaded(id, Precision::Fp32) {
+            println!("skipping: {id} is not downloaded");
+            return None;
+        }
+        let path = fixtures().join(name);
+        let Ok(mut reader) = hound::WavReader::open(&path) else {
+            println!("skipping: no {} (run scripts/stt-golden.py --synth-only)", path.display());
+            return None;
+        };
+        let rate = reader.spec().sample_rate;
+        Some((reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect(), rate))
+    }
+
+    /// `provider = cpu`, loaded once for all the tests: what the fallback
+    /// must match.
+    fn on_cpu() -> &'static Parakeet {
+        static CPU: OnceLock<Parakeet> = OnceLock::new();
+        CPU.get_or_init(|| {
+            let p = Parakeet::new(flow_core::models::DEFAULT_STT_MODEL, "cpu");
+            p.load().expect("load on the CPU");
+            p
+        })
+    }
+
+    /// The GPU this build drives, or the CPU passed off as one.
+    fn gpu_under_test() -> Device {
+        gpu_device().unwrap_or(Device::FakeGpu)
+    }
+
+    fn on_gpu() -> Parakeet {
+        let p = Parakeet::new(flow_core::models::DEFAULT_STT_MODEL, "gpu");
+        match gpu_under_test() {
+            Device::FakeGpu => {
+                let loaded = p.build_on(Device::FakeGpu, "the CPU passed off as a GPU").unwrap();
+                *p.loaded.write().unwrap() = Some(loaded);
+            }
+            _ => p.load().expect("load on the GPU (flow gpu says what is missing)"),
+        }
+        p
+    }
+
+    fn with_fallback<T>(p: &Parakeet, f: impl FnOnce(&Fallback) -> T) -> T {
+        f(p.read().as_ref().and_then(|l| l.fallback.as_ref()).expect("a recogniser on the GPU"))
+    }
+
+    /// How the next encoder runs on `p`'s GPU go: `Some` fails with that error.
+    fn script(p: &Parakeet, runs: &[Option<&'static str>]) {
+        with_fallback(p, |f| f.script.lock().unwrap().extend(runs.iter().copied()));
+    }
+
+    fn device(p: &Parakeet) -> Device {
+        p.read().as_ref().expect("loaded").device
+    }
+
+    /// Every fixture, the GPU failing each one: every take comes back as
+    /// `provider = cpu` recognises it, token for token and frame for frame.
+    /// A take on the GPU in between shows the GPU is tried again.
+    #[test]
+    fn a_take_the_gpu_fails_is_finished_on_the_cpu() {
+        let _one = one_model_test_at_a_time();
+        let Some(_) = fixture("en-01.wav") else { return };
+        let mut names: Vec<String> = std::fs::read_dir(fixtures())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".wav"))
+            .collect();
+        names.sort();
+        let cpu = on_cpu();
+        let live = LIVE.load(Ordering::SeqCst);
+        let gpu = on_gpu();
+        for (n, name) in names.iter().enumerate() {
+            let (audio, rate) = fixture(name).unwrap();
+            let started = Instant::now();
+            let want = cpu.transcribe_detailed(&audio, rate).unwrap();
+            let on_cpu = started.elapsed().as_secs_f64();
+
+            gpu.transcribe_detailed(&audio, rate).unwrap();
+            // Only a piece the GPU got through starts the count again.
+            assert_eq!(with_fallback(&gpu, |f| f.failures().in_a_row), 0, "{name}");
+
+            script(&gpu, &[Some(OUT_OF_MEMORY)]);
+            let started = Instant::now();
+            let got = gpu.transcribe_detailed(&audio, rate).unwrap();
+            println!(
+                "{name}: the fallback took {:.2}s, the CPU on its own {on_cpu:.2}s -> {:?}",
+                started.elapsed().as_secs_f64(),
+                got.text
+            );
+            assert_eq!(got, want, "{name}");
+            with_fallback(&gpu, |f| {
+                assert!(f.script.lock().unwrap().is_empty(), "the GPU was tried first");
+                let failures = f.failures();
+                assert_eq!((failures.in_a_row, failures.total), (1, n as u32 + 1));
+                assert!(failures.given_up.is_none());
+            });
+            assert_eq!(device(&gpu), gpu_under_test());
+        }
+        let report = gpu.compute_report().unwrap();
+        println!("{}: {}", report.actual, report.reason);
+        assert_eq!(report.actual, gpu_under_test().name());
+        assert!(report.reason.contains("the CPU finished those takes"), "{}", report.reason);
+
+        assert_eq!(LIVE.load(Ordering::SeqCst), live + 2, "the GPU's recogniser and the CPU's");
+        assert!(gpu.unload());
+        assert_eq!(LIVE.load(Ordering::SeqCst), live, "unloading drops both");
+    }
+
+    /// A take long enough to be cut in two: the piece the GPU fails on and
+    /// every one after it go to the CPU, and the ones before keep what the
+    /// GPU made of them.
+    #[test]
+    fn a_long_take_moves_to_the_cpu_at_the_piece_that_failed() {
+        let _one = one_model_test_at_a_time();
+        let (Some((long, 16_000)), Some((short, 16_000))) = (fixture("long-60s.wav"), fixture("en-01.wav"))
+        else {
+            return;
+        };
+        let mut audio = long;
+        audio.extend(vec![0.0; 16_000]);
+        audio.extend(short);
+        let pieces = chunks(&audio);
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        let cpu = on_cpu();
+        let gpu = on_gpu();
+
+        script(&gpu, &[Some(OUT_OF_MEMORY)]);
+        let got = gpu.transcribe_detailed(&audio, 16_000).unwrap();
+        assert_eq!(got, cpu.transcribe_detailed(&audio, 16_000).unwrap(), "failing on the first piece");
+
+        let first = gpu.with_loaded(|l| l.recognize(&audio[pieces[0].clone()])).unwrap();
+        let second = cpu.with_loaded(|l| l.recognize(&audio[pieces[1].clone()])).unwrap();
+        let offset = (pieces[1].start + SAMPLES_PER_FRAME / 2) / SAMPLES_PER_FRAME;
+        script(&gpu, &[None, Some(OUT_OF_MEMORY)]);
+        let got = gpu.transcribe_detailed(&audio, 16_000).unwrap();
+        println!("failing on the second piece -> {:?}", got.text);
+        assert_eq!(got.tokens, [&first.tokens[..], &second.tokens[..]].concat());
+        let frames: Vec<usize> =
+            first.frames.iter().copied().chain(second.frames.iter().map(|f| f + offset)).collect();
+        assert_eq!(got.frames, frames);
+        assert_eq!(with_fallback(&gpu, |f| f.failures().total), 2);
+    }
+
+    /// Three failures in a row and the CPU takes over for good: the GPU's
+    /// sessions go, the report says why, and unloading drops the CPU's too.
+    #[test]
+    fn a_gpu_that_keeps_failing_is_given_up() {
+        let _one = one_model_test_at_a_time();
+        let Some((audio, rate)) = fixture("en-01.wav") else { return };
+        let want = on_cpu().transcribe_detailed(&audio, rate).unwrap();
+        let live = LIVE.load(Ordering::SeqCst);
+        let gpu = on_gpu();
+        assert_eq!(LIVE.load(Ordering::SeqCst), live + 1);
+
+        // A take on the GPU in between starts the count again.
+        script(&gpu, &[Some(OUT_OF_MEMORY), None, Some(OUT_OF_MEMORY), Some(OUT_OF_MEMORY)]);
+        for _ in 0..4 {
+            gpu.transcribe_detailed(&audio, rate).unwrap();
+        }
+        assert_eq!(device(&gpu), gpu_under_test(), "two in a row is not enough");
+        assert_eq!(LIVE.load(Ordering::SeqCst), live + 2, "the GPU's recogniser and the CPU's");
+
+        script(&gpu, &[Some(OUT_OF_MEMORY)]);
+        assert_eq!(gpu.transcribe_detailed(&audio, rate).unwrap(), want);
+        assert_eq!(device(&gpu), Device::Cpu);
+        assert_eq!(LIVE.load(Ordering::SeqCst), live + 1, "the GPU's sessions are gone");
+        let report = gpu.compute_report().unwrap();
+        println!("{}: {}", report.actual, report.reason);
+        assert_eq!((report.requested.as_str(), report.actual.as_str()), ("gpu", "cpu"));
+        assert!(report.reason.contains("failed 3 times in a row"), "{}", report.reason);
+        assert!(report.reason.contains("so the CPU took over"), "{}", report.reason);
+        assert_eq!(gpu.transcribe_detailed(&audio, rate).unwrap(), want);
+
+        assert!(gpu.unload());
+        assert_eq!(LIVE.load(Ordering::SeqCst), live);
+    }
+
+    #[test]
+    fn a_lost_gpu_is_given_up_at_once() {
+        let _one = one_model_test_at_a_time();
+        let Some((audio, rate)) = fixture("en-01.wav") else { return };
+        let want = on_cpu().transcribe_detailed(&audio, rate).unwrap();
+        let gpu = on_gpu();
+        script(&gpu, &[Some("Status Message: WebGPU device lost (2): VK_ERROR_DEVICE_LOST")]);
+        assert_eq!(gpu.transcribe_detailed(&audio, rate).unwrap(), want);
+        assert_eq!(device(&gpu), Device::Cpu);
+        let report = gpu.compute_report().unwrap();
+        assert!(report.reason.contains("the GPU stopped working during dictation"), "{}", report.reason);
+    }
+
+    /// `unload` parks the recogniser first, then waits for the take in
+    /// progress; a GPU failure in that take must not load the CPU.
+    #[test]
+    fn a_take_finishing_during_an_unload_does_not_load_the_cpu() {
+        let _one = one_model_test_at_a_time();
+        let Some((audio, rate)) = fixture("en-01.wav") else { return };
+        let gpu = on_gpu();
+        script(&gpu, &[Some(OUT_OF_MEMORY)]);
+        gpu.parked.store(true, Ordering::SeqCst);
+        let err = gpu.transcribe_detailed(&audio, rate).unwrap_err();
+        assert!(format!("{err:#}").contains("unloaded"), "{err:#}");
+        assert!(with_fallback(&gpu, |f| f.cpu.get().is_none()));
+        assert!(gpu.unload());
     }
 }

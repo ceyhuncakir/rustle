@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { api } from "../../shared/api";
-import { describe, detach, useAction, useEvent } from "../../shared/hooks";
+import { describe, detach, useEvent } from "../../shared/hooks";
 import { AutostartSwitch } from "../../shared/prefs";
-import { Button, ChoiceRow, Group, HotkeyRecorder, Row, useToast, type Choice } from "../../shared/ui";
+import { ChoiceRow, Group, HotkeyRecorder, Row, useToast, type Choice } from "../../shared/ui";
 import { useSettings } from "../context";
 
 const OVERLAY: readonly Choice[] = [
@@ -33,14 +33,6 @@ export function DesktopSection() {
     }
   };
 
-  const updates = useAction(
-    async () => {
-      const result = await api.checkForUpdates();
-      toast(result.available ? `Flow ${result.version ?? ""} is available`.replace(/\s+/g, " ") : "You have the latest version");
-    },
-    (message) => toast(`Could not check: ${message}`),
-  );
-
   return (
     <Group title="Desktop" description="How Flow sits in your desktop">
       <Row title="Shortcut" subtitle="Hold to talk, or tap to keep recording until the next tap">
@@ -51,12 +43,6 @@ export function DesktopSection() {
 
       <Row title="Launch at login" htmlFor="autostart" subtitle="Start Flow in the background when you sign in">
         <AutostartSwitch id="autostart" onSaved={(on) => toast(on ? "Flow will start when you log in" : "Flow will not start at login")} />
-      </Row>
-
-      <Row title="Updates" subtitle={status?.version ? `Flow ${status.version}` : ""}>
-        <Button busy={updates.busy} onClick={() => void updates.start()}>
-          Check for updates
-        </Button>
       </Row>
     </Group>
   );

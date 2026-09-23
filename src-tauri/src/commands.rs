@@ -68,8 +68,9 @@ fn to_value(value: Json) -> Result<config::Value, String> {
 pub fn set_config_value(shared: App<'_>, section: String, key: String, value: Json) -> Result<bool, String> {
     config::set_value(&section, &key, to_value(value)?).map_err(err)?;
     shared.reload_config();
-    // The shortcut is re-registered live by `set_hotkey`.
-    let live = section == "desktop" && key == "hotkey";
+    // The shortcut is re-registered live by `set_hotkey`; the update check
+    // reads its switch each time and is no business of the engine.
+    let live = section == "desktop" && (key == "hotkey" || key == "check_updates");
     if !live && shared.running() {
         shared.needs_restart.store(true, Ordering::SeqCst);
     }
@@ -123,6 +124,10 @@ pub fn get_status(shared: App<'_>) -> Status {
 pub fn current_hotkey(session: flow_desktop::Session, config: &Config) -> String {
     #[cfg(target_os = "linux")]
     {
+        // Where the portal hands Flow its shortcut, the desktop chose the key.
+        if let Some(key) = crate::host::shortcut::portal_key() {
+            return key;
+        }
         if matches!(session, flow_desktop::Session::GnomeWayland { .. }) {
             if let Some(binding) = crate::gnome_extension::binding() {
                 return binding;
@@ -284,6 +289,7 @@ pub fn get_compute_report(shared: App<'_>) -> flow_stt::ComputeReport {
         requested: shared.config().stt.provider,
         actual: "not loaded".into(),
         reason: "the recogniser has not been loaded yet".into(),
+        fallback: None,
     })
 }
 
@@ -430,18 +436,7 @@ pub fn diagnostics(shared: &Shared) -> String {
     out
 }
 
-#[derive(Debug, Serialize)]
-pub struct UpdateInfo {
-    pub available: bool,
-    pub version: Option<String>,
-}
-
-/// The updater plugin arrives with the release milestone; until then this
-/// honestly says nothing is available.
-#[tauri::command]
-pub fn check_for_updates() -> UpdateInfo {
-    UpdateInfo { available: false, version: None }
-}
+// Updates (check_for_updates, install_update) live in updates.rs.
 
 // -- permissions -------------------------------------------------------------------
 
@@ -468,7 +463,7 @@ pub fn get_permissions() -> Vec<Permission> {
                 required: true,
                 help: "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.".into(),
             }),
-            Session::KdeWayland | Session::LayerShellWayland | Session::OtherWayland => {
+            session @ (Session::KdeWayland | Session::LayerShellWayland | Session::OtherWayland) => {
                 // On PATH is not enough: ydotool needs its daemon, dotool
                 // needs /dev/uinput.
                 let tool = flow_desktop::linux::wayland::probe_tool();
@@ -484,12 +479,15 @@ pub fn get_permissions() -> Vec<Permission> {
                         ),
                     },
                 });
+                // Through the desktop portal, or the compositor's own
+                // bindings running `flow hotkey`.
+                let (granted, help) = crate::host::shortcut::permission(session);
                 list.push(Permission {
                     id: "hotkey-wayland".into(),
                     label: "Global shortcut".into(),
-                    granted: false,
+                    granted,
                     required: true,
-                    help: "Global shortcuts on this desktop are not wired up yet in this build.".into(),
+                    help,
                 });
             }
             _ => {}
@@ -536,9 +534,10 @@ pub fn request_permission(app: AppHandle, id: String) -> Result<(), String> {
             let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
             app.opener().open_url(url, None::<&str>).map_err(err)
         }
-        "hotkey-wayland" => Err("Global shortcuts on this desktop come in a later version of Flow. Until \
-             then, bind `flow dictate` to a key in your desktop's keyboard settings."
-            .into()),
+        // Shows the desktop's shortcut dialog, or explains the key bindings
+        // where its portal has none.
+        #[cfg(target_os = "linux")]
+        "hotkey-wayland" => crate::host::shortcut::request(&app),
         "paste-tool" => Err("Install dotool or ydotool with your package manager (ydotool also needs \
              its ydotoold service running), then check again."
             .into()),
@@ -632,6 +631,12 @@ pub fn set_hotkey(app: AppHandle, shared: App<'_>, combo: String) -> Result<(), 
     #[cfg(target_os = "linux")]
     if matches!(flow_desktop::session::detect(), flow_desktop::Session::GnomeWayland { extension: true }) {
         return crate::gnome_extension::set_binding(&combo).map_err(err);
+    }
+    // Where the desktop's portal hands Flow its shortcut, the desktop picks
+    // the key; asking it for another would change nothing.
+    #[cfg(target_os = "linux")]
+    if flow_desktop::linux::portal::active() {
+        return Err(crate::host::shortcut::OWNED_BY_THE_DESKTOP.into());
     }
 
     // The engine's sender and current shortcut, without holding the lock

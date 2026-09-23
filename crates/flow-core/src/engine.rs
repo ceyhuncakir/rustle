@@ -84,13 +84,15 @@ pub trait Injector: Send + Sync {
 
 /// Raw `Down`/`Up` come from platforms that report key state and go through
 /// [`HoldOrTap`]; `Pressed`/`Released` are already resolved (the GNOME
-/// extension does that itself).
+/// extension does that itself). `Toggle` starts a take when idle and stops
+/// it when recording, for bindings that only fire on press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
     Down,
     Up,
     Pressed,
     Released,
+    Toggle,
     Cancel,
 }
 
@@ -277,6 +279,7 @@ impl Engine {
             }
             Event::Hotkey(HotkeyEvent::Pressed) => self.on_pressed("toggle"),
             Event::Hotkey(HotkeyEvent::Released) => self.on_released(),
+            Event::Hotkey(HotkeyEvent::Toggle) => self.on_toggle(),
             Event::Hotkey(HotkeyEvent::Cancel) => self.on_cancel(),
             Event::Level(level) => self.on_level(level),
             Event::Finished { take, raw, text } => {
@@ -382,6 +385,21 @@ impl Engine {
         self.processing_at = Instant::now();
         self.overlay.set_state(State::Thinking);
         self.spawn_process(audio, self.take);
+    }
+
+    /// A toggle can arrive between raw presses of the real shortcut (a
+    /// script next to a portal key), so HoldOrTap is kept in step with it:
+    /// after a toggle starts a take, the next press stops it, as after a tap.
+    fn on_toggle(&mut self) {
+        if self.recorder.recording() {
+            self.hold.reset();
+            self.on_released();
+            return;
+        }
+        self.on_pressed("toggle");
+        if self.recorder.recording() {
+            self.hold.latch();
+        }
     }
 
     fn on_cancel(&mut self) {
@@ -1061,6 +1079,63 @@ mod tests {
         let mut r = rig(2.0, FakeTranscriber::saying("x"));
         r.engine.handle(Event::MicError("stray".into()));
         assert!(r.overlay.states.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn toggle_starts_when_idle_and_stops_when_recording() {
+        let mut r = rig(2.0, FakeTranscriber::saying("toggled"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        assert!(r.engine.recorder.recording());
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        assert!(!r.engine.recorder.recording());
+        settle(&mut r.engine);
+        assert_eq!(*r.injector.0.lock().unwrap(), vec!["toggled".to_string()]);
+    }
+
+    #[test]
+    fn a_press_after_a_toggle_stops_the_take() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        // The raw shortcut must not need two presses to stop it.
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert!(!r.engine.recorder.recording());
+        assert_eq!(r.stops.load(Ordering::SeqCst), 1);
+        // Its release does nothing, and the next press starts afresh.
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Up));
+        settle(&mut r.engine);
+        past_debounce();
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_toggle_after_a_tap_stops_the_take_and_the_next_press_starts() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Up));
+        assert!(r.engine.recorder.recording(), "a tap latches");
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        assert!(!r.engine.recorder.recording());
+        settle(&mut r.engine);
+        past_debounce();
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 2);
+        assert!(r.engine.recorder.recording());
+    }
+
+    #[test]
+    fn a_toggle_while_busy_is_dropped_without_latching() {
+        let gate = Arc::new(Gate::default());
+        let mut r = rig(2.0, FakeTranscriber::gated("hi", &gate));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        // Still transcribing: this one is dropped.
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Toggle));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 1);
+        gate.open(1);
+        next_result(&mut r.engine);
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 2, "the next press starts a take");
     }
 
     #[test]

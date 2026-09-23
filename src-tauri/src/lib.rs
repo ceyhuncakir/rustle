@@ -10,6 +10,7 @@ pub mod gnome_extension;
 pub mod host;
 pub mod overlay;
 pub mod tray;
+pub mod updates;
 pub mod watchdog;
 pub mod windows;
 
@@ -33,6 +34,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -67,7 +69,9 @@ pub fn run() {
             commands::set_hotkey,
             commands::get_autostart,
             commands::set_autostart,
-            commands::check_for_updates,
+            updates::check_for_updates,
+            updates::install_update,
+            updates::open_release_page,
             commands::get_permissions,
             commands::request_permission,
             commands::copy_diagnostics,
@@ -86,6 +90,9 @@ pub fn run() {
             // A signal quits like the tray's Quit, through RunEvent::Exit.
             let quitter = app.handle().clone();
             host::on_termination(move || quitter.exit(0));
+
+            // At most once a day, and only a notification (updates.rs).
+            updates::watch(app.handle().clone(), shared.clone());
 
             let handle = app.handle().clone();
             if host::first_run_pending() {

@@ -56,9 +56,13 @@ chmod 755 "$BIN"
 install -Dm644 "$ROOT/packaging/flow-dictation.svg" \
     "$HOME/.local/share/icons/hicolor/scalable/apps/flow-dictation.svg"
 # An absolute Exec: the desktop session's PATH often lacks ~/.local/bin.
+# The entry is named after Flow's app id: the desktop portal only hands
+# global shortcuts to an app whose id names an installed entry.
 mkdir -p "$HOME/.local/share/applications"
-sed "s|^Exec=flow\$|Exec=\"$BIN\"|" "$ROOT/packaging/flow-dictation.desktop" \
-    >"$HOME/.local/share/applications/flow-dictation.desktop"
+sed "s|^Exec=flow\$|Exec=\"$BIN\"|" "$ROOT/packaging/ai.flow.app.desktop" \
+    >"$HOME/.local/share/applications/ai.flow.app.desktop"
+# Earlier installs named it flow-dictation.desktop.
+rm -f "$HOME/.local/share/applications/flow-dictation.desktop"
 install -Dm644 "$ROOT/packaging/flow.service" "$HOME/.config/systemd/user/flow.service"
 
 # The unit runs `flow --headless`, which needs the GNOME Shell extension.

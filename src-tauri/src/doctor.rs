@@ -2,6 +2,7 @@
 
 use flow_core::config::Config;
 use flow_core::models;
+use flow_desktop::HotkeySource;
 use flow_stt::GpuReport;
 use serde::Serialize;
 
@@ -53,6 +54,60 @@ fn gpu_check(provider: &str, gpu: &GpuReport) -> Result<String, String> {
     }
 }
 
+/// Where the dictation shortcut comes from: the desktop's portal, the GNOME
+/// extension, a grab of Flow's own, or only the control socket that the
+/// desktop's key bindings reach through `flow hotkey`.
+fn shortcut_check(session: flow_desktop::Session, source: &HotkeySource) -> Result<String, String> {
+    let main = match source {
+        HotkeySource::AppShortcut(combo) => Ok(format!("{combo}, grabbed by Flow")),
+        HotkeySource::Builtin(_) => builtin_shortcut(session),
+        HotkeySource::External(how) => Ok(format!("socket only - {how}")),
+        HotkeySource::Unsupported(why) => Err(format!("none - {why}")),
+    };
+    // `flow hotkey` works on every Linux desktop while Flow runs.
+    #[cfg(target_os = "linux")]
+    let main = {
+        let socket = if flow_desktop::linux::control::listening() {
+            "control socket listening"
+        } else {
+            "control socket not listening (Flow is not running)"
+        };
+        let with = |m: String| format!("{}; {socket}", m.trim_end_matches('.'));
+        main.map(with).map_err(with)
+    };
+    main
+}
+
+#[cfg(target_os = "linux")]
+fn builtin_shortcut(session: flow_desktop::Session) -> Result<String, String> {
+    use flow_desktop::linux::portal::{self, PortalState};
+    if matches!(session, flow_desktop::Session::GnomeWayland { extension: true }) {
+        return Ok("GNOME Shell extension".into());
+    }
+    let version = portal::version().map(|v| format!(" v{v}")).unwrap_or_default();
+    let state = portal::state();
+    match &state {
+        _ if state.is_bound() => Ok(format!(
+            "portal{version}: {}",
+            portal::display_trigger(state.dictate_trigger().unwrap_or_default())
+        )),
+        PortalState::Binding => Ok(format!("portal{version}: waiting for the desktop's dialog")),
+        PortalState::Declined => Err(format!(
+            "portal{version}: the desktop's dialog was closed without adding the shortcut - \
+             turn dictation off and on to be asked again"
+        )),
+        PortalState::Failed(why) => Err(format!("portal{version}: {why}")),
+        // Another process (`flow doctor` next to a running Flow) cannot see
+        // the binding; the desktop's settings list it.
+        _ => Ok(format!("portal{version}; Flow binds it when dictation starts")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn builtin_shortcut(_session: flow_desktop::Session) -> Result<String, String> {
+    Ok("delivered by the desktop".into())
+}
+
 pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     let mut checks = Vec::new();
 
@@ -71,15 +126,13 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
 
     // Desktop integration.
     let session = flow_desktop::session::detect();
-    let desktop = match flow_desktop::build_for(session, &config.desktop) {
-        Ok(backends) => match &backends.hotkey {
-            flow_desktop::HotkeySource::Builtin(_) => Ok(format!("{session}; hotkey via the desktop")),
-            flow_desktop::HotkeySource::AppShortcut(c) => Ok(format!("{session}; hotkey {c}")),
-            flow_desktop::HotkeySource::Unsupported(why) => Err(format!("{session}; no hotkey: {why}")),
-        },
-        Err(err) => Err(format!("{session}: {err:#}")),
-    };
-    checks.push(check("Desktop", desktop));
+    match flow_desktop::build_for(session, &config.desktop) {
+        Ok(backends) => {
+            checks.push(check("Desktop", Ok(session.to_string())));
+            checks.push(check("Shortcut", shortcut_check(session, &backends.hotkey)));
+        }
+        Err(err) => checks.push(check("Desktop", Err(format!("{session}: {err:#}")))),
+    }
     // Outside GNOME's extension, Wayland pastes through a helper program,
     // and one merely on PATH may still be unable to type.
     #[cfg(target_os = "linux")]

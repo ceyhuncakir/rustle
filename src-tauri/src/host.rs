@@ -27,6 +27,9 @@ use flow_desktop::{Backends, HotkeySource, OverlayChoice};
 use log::{info, warn};
 use tauri::{AppHandle, Emitter};
 
+#[cfg(target_os = "linux")]
+pub mod shortcut;
+
 /// Everything the commands, the tray and the CLI share.
 pub struct Shared {
     pub config: Mutex<Config>,
@@ -53,7 +56,8 @@ pub struct Shared {
 pub struct Running {
     pub tx: Sender<Event>,
     pub thread: JoinHandle<()>,
-    pub hotkey: Option<Box<dyn Hotkey>>,
+    /// The desktop's hotkey, and on Linux the control socket beside it.
+    pub hotkeys: Vec<Box<dyn Hotkey>>,
     pub shortcut: Option<String>,
     /// Unloads a local cleanup model if Flow dies before the engine can.
     pub watchdog: Option<crate::watchdog::Watchdog>,
@@ -280,20 +284,26 @@ fn launch(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
 
     // The hotkey is wired before the engine thread starts so nothing is
     // missed; events simply queue until `run` drains them.
-    let mut hotkey = None;
+    let relay = relay_hotkeys(app, tx.clone());
+    let mut hotkeys: Vec<Box<dyn Hotkey>> = Vec::new();
     let mut shortcut = None;
     match backends.hotkey {
         HotkeySource::Builtin(mut builtin) => {
-            builtin.start(relay_hotkeys(app, tx.clone()))?;
-            hotkey = Some(builtin);
+            builtin.start(relay.clone())?;
+            hotkeys.push(builtin);
         }
         HotkeySource::AppShortcut(combo) => match app {
             Some(app) => {
                 register_shortcut(app, &combo, tx.clone())?;
                 shortcut = Some(combo);
             }
+            None if cfg!(target_os = "linux") => {
+                warn!("headless: no global shortcut here; bind a key to `flow hotkey toggle` instead")
+            }
             None => warn!("headless: no global shortcut on this desktop; use `flow dictate`"),
         },
+        // Nothing to start: the compositor's bindings reach the socket.
+        HotkeySource::External(how) => info!("no shortcut of Flow's own on this desktop: {how}"),
         HotkeySource::Unsupported(why) => {
             warn!("no hotkey: {why}");
             if let Some(app) = app {
@@ -301,6 +311,11 @@ fn launch(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    hotkeys.extend(control_socket(relay));
+    #[cfg(not(target_os = "linux"))]
+    drop(relay);
 
     // Before the engine warms the cleanup model up, so a crash from here on
     // does not leave it in video memory.
@@ -335,7 +350,7 @@ fn launch(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
     };
 
     *shared.engine.lock().unwrap() =
-        Some(Running { tx, thread, hotkey, shortcut, watchdog, _claim: Some(claim) });
+        Some(Running { tx, thread, hotkeys, shortcut, watchdog, _claim: Some(claim) });
     shared.needs_restart.store(false, Ordering::SeqCst);
     Ok(())
 }
@@ -363,6 +378,23 @@ fn claim_engine() -> anyhow::Result<File> {
         Err(std::fs::TryLockError::Error(err)) => {
             warn!("could not lock {}: {err}; carrying on", path.display());
             Ok(file)
+        }
+    }
+}
+
+/// The control socket, for `flow hotkey` and for the compositors that can
+/// only reach Flow that way. Failing to listen costs only that.
+#[cfg(target_os = "linux")]
+fn control_socket(sink: Sender<Event>) -> Option<Box<dyn Hotkey>> {
+    let Some(mut socket) = flow_desktop::linux::control::ControlSocket::new() else {
+        warn!("no $XDG_RUNTIME_DIR: no control socket, so `flow hotkey` cannot reach this Flow");
+        return None;
+    };
+    match socket.start(sink) {
+        Ok(()) => Some(Box::new(socket)),
+        Err(err) => {
+            warn!("{err}; `flow hotkey` cannot reach this Flow");
+            None
         }
     }
 }
@@ -396,7 +428,7 @@ pub fn emit_hotkey(app: &AppHandle, event: HotkeyEvent) {
     let down = match event {
         HotkeyEvent::Down | HotkeyEvent::Pressed => true,
         HotkeyEvent::Up | HotkeyEvent::Released => false,
-        HotkeyEvent::Cancel => return,
+        HotkeyEvent::Toggle | HotkeyEvent::Cancel => return,
     };
     let _ = app.emit("flow:hotkey", serde_json::json!({ "down": down }));
 }
@@ -464,7 +496,7 @@ pub fn stop_for_exit(shared: &Shared, app: Option<&AppHandle>) -> bool {
 
 fn stop_locked(shared: &Shared, app: Option<&AppHandle>) {
     let Some(mut running) = shared.engine.lock().unwrap().take() else { return };
-    if let Some(hotkey) = running.hotkey.as_mut() {
+    for hotkey in &mut running.hotkeys {
         hotkey.stop();
     }
     if let (Some(app), Some(combo)) = (app, running.shortcut.as_deref()) {

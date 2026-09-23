@@ -70,6 +70,13 @@ impl HoldOrTap {
         self.recording = false;
         self.pressed_at = None;
     }
+
+    /// Recording was started without a press (a toggle command): the next
+    /// press stops it, exactly as after a tap.
+    pub fn latch(&mut self) {
+        self.recording = true;
+        self.pressed_at = None;
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +141,15 @@ mod tests {
         h.reset();
         assert_eq!(h.on_up(start + Duration::from_secs(1)), None);
         assert_eq!(h.on_down(start + Duration::from_secs(2)), Some(Action::Start));
+    }
+
+    #[test]
+    fn a_latched_take_stops_on_the_next_press() {
+        let mut h = HoldOrTap::new(true);
+        let start = t0();
+        h.latch();
+        assert_eq!(h.on_up(start), None);
+        assert_eq!(h.on_down(start), Some(Action::Stop));
+        assert_eq!(h.on_down(start + Duration::from_secs(1)), Some(Action::Start));
     }
 }

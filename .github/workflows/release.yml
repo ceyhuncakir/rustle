@@ -1,5 +1,10 @@
 name: Release
 
+# Push a tag vX.Y.Z (matching package.json and Cargo.toml) to build every
+# installer into a draft release; publish the draft to ship it. Signing is
+# optional throughout: without a secret that part is skipped, with a warning,
+# and the installers come out unsigned. docs/releasing.md has the details.
+
 on:
   push:
     tags: ["v*"]
@@ -37,6 +42,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          app=$(node -p "require('./package.json').version")
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$app" ] || [ "$crate" != "$app" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, package.json $app and Cargo.toml $crate must agree"
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ contains(matrix.args, 'aarch64-apple') && 'aarch64-apple-darwin' || '' }}
@@ -50,23 +65,140 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
             libasound2-dev libdbus-1-dev libxcb-ewmh-dev libxcb-randr0-dev pkg-config libxdo-dev xdg-utils
       - run: pnpm install --frozen-lockfile
-      - uses: tauri-apps/tauri-action@v1
+
+      # Updater artifacts (the signed bundles and latest.json) need the
+      # updater key; tauri.release.conf.json switches them on.
+      - name: Updater artifacts
+        id: updater
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Updater signing (generate with `pnpm tauri signer generate`):
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing + notarisation (optional until the account exists):
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" = true ]; then
+            echo "args=--config src-tauri/tauri.release.conf.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set: no latest.json, so installed copies will not be offered this release."
+          fi
+
+      # The bundler takes APPLE_CERTIFICATE as soon as it is defined, even
+      # empty, so the Apple values reach it only when they are all there.
+      - name: macOS signing and notarisation
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          pass_on() {
+            local end
+            end="EOF_$(openssl rand -hex 16)"
+            { echo "$1<<$end"; printenv "$1"; echo "$end"; } >> "$GITHUB_ENV"
+          }
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            pass_on APPLE_CERTIFICATE
+            pass_on APPLE_CERTIFICATE_PASSWORD
+            pass_on APPLE_SIGNING_IDENTITY
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              pass_on APPLE_ID
+              pass_on APPLE_PASSWORD
+              pass_on APPLE_TEAM_ID
+            else
+              echo "::warning::APPLE_ID, APPLE_PASSWORD or APPLE_TEAM_ID is not set: signed but not notarised, so Gatekeeper still objects."
+            fi
+          else
+            echo "::warning::The Apple signing secrets are not set: the app is unsigned and Gatekeeper will block it."
+          fi
+
+      # A code signing certificate as a base64 .pfx: import it and hand the
+      # bundler its thumbprint through one more --config.
+      - name: Windows code signing
+        id: windows-signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "::warning::WINDOWS_CERTIFICATE is not set: the installer is unsigned and SmartScreen will warn."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "flow-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String(($env:WINDOWS_CERTIFICATE -replace '\s', '')))
+          $password = ConvertTo-SecureString -String "$env:WINDOWS_CERTIFICATE_PASSWORD" -Force -AsPlainText
+          $imported = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $cert = $imported | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+          if (-not $cert) {
+            Write-Output "::error::The certificate in WINDOWS_CERTIFICATE carries no private key."
+            exit 1
+          }
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = "sha256"
+            timestampUrl = "http://timestamp.digicert.com"
+            tsp = $true
+          } } } | ConvertTo-Json -Depth 4
+          [IO.File]::WriteAllText("src-tauri/tauri.windows-signing.conf.json", $config)
+          "args=--config src-tauri/tauri.windows-signing.conf.json" >> $env:GITHUB_OUTPUT
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts; an empty password is fine.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: "Flow v__VERSION__"
           releaseBody: "See the changelog for what changed."
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          # Each job merges its platforms into the release's latest.json.
+          uploadUpdaterJson: true
+          # The installer the app ships as; an .msi is built too.
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }} ${{ steps.windows-signing.outputs.args }}
+
+  # The three jobs each rewrite latest.json, and two finishing together can
+  # drop a platform. Catch that before the draft is published.
+  updater-manifest:
+    name: Check latest.json
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      # Drafts are only visible with push access.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every platform is in latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != true ]; then
+            echo "No updater key, so no latest.json to check."
+            exit 0
+          fi
+          version=$(node -p "require('./package.json').version")
+          gh release download "v$version" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$RUNNER_TEMP"
+          python3 - "$RUNNER_TEMP/latest.json" "$version" <<'EOF'
+          import json, sys
+          manifest = json.load(open(sys.argv[1]))
+          wanted = ["darwin-aarch64", "darwin-aarch64-app", "linux-x86_64", "linux-x86_64-appimage",
+                    "windows-x86_64", "windows-x86_64-nsis"]
+          platforms = manifest.get("platforms", {})
+          missing = [p for p in wanted if not (platforms.get(p, {}).get("url") and platforms.get(p, {}).get("signature"))]
+          if manifest.get("version") != sys.argv[2]:
+              print(f"::error::latest.json announces {manifest.get('version')}, not {sys.argv[2]}")
+              sys.exit(1)
+          if missing:
+              print("::error::latest.json lacks " + ", ".join(missing)
+                    + ". Re-run the build job for that platform, then this one.")
+              sys.exit(1)
+          print("latest.json:", ", ".join(sorted(platforms)))
+          EOF

@@ -158,11 +158,19 @@ pub struct DesktopConfig {
     pub hotkey: String,
     /// Holding the shortcut stops recording on release; a tap latches it.
     pub push_to_talk: bool,
+    /// Ask GitHub once a day whether a newer release is out, and say so with
+    /// a notification. Copies built from source never ask on their own.
+    pub check_updates: bool,
 }
 
 impl Default for DesktopConfig {
     fn default() -> Self {
-        Self { overlay: "auto".into(), hotkey: default_hotkey().into(), push_to_talk: true }
+        Self {
+            overlay: "auto".into(),
+            hotkey: default_hotkey().into(),
+            push_to_talk: true,
+            check_updates: true,
+        }
     }
 }
 
@@ -404,6 +412,9 @@ hotkey = "Ctrl+Alt+Space"
 # Hold the shortcut to talk and release to stop; a short tap keeps
 # recording until the next tap.
 push_to_talk = true
+# Once a day, ask GitHub whether a newer Flow is out and say so with a
+# notification. Nothing else is sent. Builds from source never ask.
+check_updates = true
 "##;
 
 /// Write the commented default file if it does not exist yet. Returns the

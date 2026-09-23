@@ -38,6 +38,14 @@ pub enum Command {
         #[arg(short, long, default_value_t = 5.0)]
         seconds: f32,
     },
+    /// Drive the running Flow from a key binding, for desktops that hand
+    /// out no global shortcuts (sway, river, niri): `down` on press and `up`
+    /// on release hold to talk, `toggle` starts or stops, `cancel` drops the
+    /// take.
+    Hotkey {
+        #[arg(value_parser = ["down", "up", "toggle", "cancel"])]
+        action: String,
+    },
     /// Print what the desktop reports as the focused app.
     Context,
     /// List microphones.
@@ -106,6 +114,16 @@ pub enum ModelsAction {
 }
 
 pub fn run(command: Command) -> i32 {
+    // Runs on every key press, so it reads no config and loads nothing.
+    if let Command::Hotkey { action } = &command {
+        return match hotkey(action) {
+            Ok(()) => 0,
+            Err(err) => {
+                eprintln!("error: {err}");
+                1
+            }
+        };
+    }
     // Needs nothing from the config, so a broken one cannot stop it.
     if let Command::WatchOllama { endpoint, model } = &command {
         return match crate::watchdog::run(endpoint, model) {
@@ -287,7 +305,20 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             }
         },
         Command::Eval { filter } => crate::eval::run(&config, filter.as_deref()),
-        Command::WatchOllama { .. } => unreachable!("handled in run"),
+        Command::WatchOllama { .. } | Command::Hotkey { .. } => unreachable!("handled in run"),
+    }
+}
+
+/// One line to the running Flow's control socket.
+fn hotkey(action: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        flow_desktop::linux::control::send(action).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = action;
+        Err("`flow hotkey` is for Linux desktops; set the shortcut in Flow's settings instead".into())
     }
 }
 

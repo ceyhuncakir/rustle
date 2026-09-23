@@ -56,6 +56,8 @@ export interface DesktopConfig {
   overlay: string;
   hotkey: string;
   push_to_talk: boolean;
+  /** Ask GitHub once a day whether a newer release is out (release installs only). */
+  check_updates: boolean;
 }
 
 export interface Config {
@@ -146,6 +148,8 @@ export interface ComputeReport {
   actual: string;
   /** Why `actual` differs from `requested`, or empty. */
   reason: string;
+  /** What the CPU has had to do for a failing GPU during dictation, or null. */
+  fallback: string | null;
 }
 
 export interface ProviderSpec {
@@ -171,9 +175,23 @@ export interface DoctorCheck {
   detail: string;
 }
 
+/** What `check_for_updates` returns (src-tauri/src/updates.rs). */
 export interface UpdateCheck {
   available: boolean;
-  version?: string;
+  /** The running version. */
+  current: string;
+  /** The newer version, when there is one. */
+  version: string | null;
+  notes: string | null;
+  /** When it was published (RFC 3339), when the release says. */
+  date: string | null;
+  /** appimage | appimagereadonly | deb | rpm | nsis | msi | app | source | dev */
+  install: string;
+  /** Whether "Install and restart" can replace this copy. */
+  can_install: boolean;
+  /** When it cannot: how to update instead. */
+  how: string | null;
+  release_url: string;
 }
 
 export interface Permission {
@@ -233,6 +251,14 @@ export interface DownloadEvent {
 export interface HotkeyEvent {
   down: boolean;
 }
+/** While `install_update` downloads; `done` with no error means Flow restarts now. */
+export interface UpdateEvent {
+  received: number;
+  /** 0 while unknown. */
+  total: number;
+  done: boolean;
+  error?: string | null;
+}
 
 export interface EventPayloads {
   "flow:state": StateEvent;
@@ -240,6 +266,7 @@ export interface EventPayloads {
   "flow:level": LevelEvent;
   "flow:download": DownloadEvent;
   "flow:hotkey": HotkeyEvent;
+  "flow:update": UpdateEvent;
 }
 
 export function on<E extends keyof EventPayloads>(event: E, handler: (payload: EventPayloads[E]) => void): Promise<Unlisten> {
@@ -268,6 +295,9 @@ export const api = {
   runDoctor: () => invoke<DoctorCheck[]>("run_doctor"),
   copyDiagnostics: () => invoke<string>("copy_diagnostics"),
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
+  /** Downloads over `flow:update`, installs and restarts Flow; rejects when this copy cannot update itself. */
+  installUpdate: () => invoke<void>("install_update"),
+  openReleasePage: () => invoke<void>("open_release_page"),
 
   // audio + recognition
   listInputDevices: () => invoke<InputDevice[]>("list_input_devices"),

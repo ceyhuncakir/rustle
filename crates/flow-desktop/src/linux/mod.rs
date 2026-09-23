@@ -7,7 +7,9 @@ use flow_core::config::DesktopConfig;
 use crate::generic::{ActiveWindowFocus, ClipboardPasteInjector};
 use crate::{Backends, HotkeySource, OverlayChoice, OverlayMode, Session, WebviewHost};
 
+pub mod control;
 pub mod gnome;
+pub mod portal;
 pub mod wayland;
 
 pub fn build(session: Session, config: &DesktopConfig) -> anyhow::Result<Backends> {
@@ -35,14 +37,14 @@ pub fn build(session: Session, config: &DesktopConfig) -> anyhow::Result<Backend
             // Mutter has no layer-shell and exposes no virtual keyboard, so
             // without the extension there is no overlay and no reliable
             // paste. Degrade rather than refuse: pasting through the
-            // portal-less tool cascade may still work with ydotool.
-            notes.push("Flow's GNOME Shell extension is not enabled: no island, no hotkey".into());
+            // portal-less tool cascade may still work with ydotool, and
+            // GNOME 48 and later hand out shortcuts through the portal.
+            notes.push("Flow's GNOME Shell extension is not enabled: no island".into());
+            let hotkey = wayland_hotkey(session, config, &mut notes);
             Ok(Backends {
                 session,
                 overlay: OverlayChoice::Off,
-                hotkey: HotkeySource::Unsupported(
-                    "GNOME Wayland delivers global shortcuts only through the Flow Shell extension; enable it and log out".into(),
-                ),
+                hotkey,
                 focus: Arc::new(ActiveWindowFocus),
                 injector: Arc::new(wayland::ToolCascadeInjector::default()),
                 notes,
@@ -75,14 +77,11 @@ pub fn build(session: Session, config: &DesktopConfig) -> anyhow::Result<Backend
             };
             let injector = wayland::ToolCascadeInjector::default();
             notes.push(format!("paste: {}", injector.describe()));
+            let hotkey = wayland_hotkey(session, config, &mut notes);
             Ok(Backends {
                 session,
                 overlay,
-                // Portal and evdev hotkeys land in M5; until then the app's
-                // shortcut plugin is a no-op on Wayland and doctor says so.
-                hotkey: HotkeySource::Unsupported(
-                    "global shortcuts on this Wayland desktop are not wired up yet".into(),
-                ),
+                hotkey,
                 focus: Arc::new(ActiveWindowFocus),
                 injector: Arc::new(injector),
                 notes,
@@ -91,4 +90,47 @@ pub fn build(session: Session, config: &DesktopConfig) -> anyhow::Result<Backend
 
         Session::Windows | Session::MacOs => unreachable!("not a Linux session"),
     }
+}
+
+/// Wayland without Flow's extension: the portal's global shortcuts where
+/// the desktop offers them, else the compositor's own key bindings running
+/// `flow hotkey`. Only asks the portal what it offers; binding waits for
+/// the engine to start, so `flow doctor` never pops up a dialog.
+fn wayland_hotkey(session: Session, config: &DesktopConfig, notes: &mut Vec<String>) -> HotkeySource {
+    match portal::version() {
+        Some(version) => {
+            notes.push(format!("hotkey: desktop portal global shortcuts (version {version})"));
+            HotkeySource::Builtin(Box::new(portal::PortalHotkey::new(&config.hotkey)))
+        }
+        None => {
+            notes.push(
+                "hotkey: the desktop portal has no global shortcuts; key bindings must run `flow hotkey`"
+                    .into(),
+            );
+            HotkeySource::External(binding_help(session))
+        }
+    }
+}
+
+/// How to reach Flow from a desktop's own key bindings, for a desktop whose
+/// portal has no global shortcuts.
+pub fn binding_help(session: Session) -> String {
+    match session {
+        Session::GnomeWayland { .. } => {
+            "This GNOME has no shortcut portal (that came with GNOME 48). Enable Flow's GNOME Shell \
+             extension, or add a custom shortcut in Settings → Keyboard → Keyboard Shortcuts that runs \
+             `flow hotkey toggle`."
+        }
+        Session::KdeWayland => {
+            "This Plasma has no shortcut portal. Add a custom shortcut in System Settings → Keyboard → \
+             Shortcuts that runs `flow hotkey toggle`."
+        }
+        _ => {
+            "Your compositor's portal has no global shortcuts, so bind a key in its config to run \
+             `flow hotkey down` on press and `flow hotkey up` on release (sway: `bindsym --no-repeat \
+             Ctrl+Alt+space exec flow hotkey down` and `bindsym --release Ctrl+Alt+space exec flow hotkey \
+             up`), or one key to `flow hotkey toggle`."
+        }
+    }
+    .into()
 }
