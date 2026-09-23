@@ -1,21 +1,27 @@
 import { useEffect, useState } from "react";
-import { comboOf, isUsableCombo, keyNameOf, modifiersOf } from "../hotkey";
+import { IS_MAC, comboOf, isModifierOnly, isUsableCombo, keyNameOf, modifiersOf } from "../hotkey";
 import { Button } from "./Button";
 import { Keys } from "./Keys";
 
 interface HotkeyRecorderProps {
   value: string;
-  onSave: (combo: string) => void | Promise<void>;
+  /** Reject (after telling the user why) to keep the new combination on screen for another try. */
+  onSave: (combo: string) => void | Promise<unknown>;
   /** Live state of the shortcut, from `flow:hotkey`. */
   down?: boolean;
 }
+
+const NEEDS_MODIFIER = IS_MAC ? "Add ⌃, ⌥ or ⌘" : "Add Ctrl, Alt or Super";
 
 /** Click, press a combination, see it, save. Escape cancels. */
 export function HotkeyRecorder({ value, onSave, down }: HotkeyRecorderProps) {
   const [recording, setRecording] = useState(false);
   const [pending, setPending] = useState<string[]>([]);
+  /** Why the last key pressed while recording was not taken. */
+  const [hint, setHint] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     if (!recording) return;
@@ -31,10 +37,12 @@ export function HotkeyRecorder({ value, onSave, down }: HotkeyRecorderProps) {
       const key = keyNameOf(e);
       if (isUsableCombo(mods, key)) {
         setCandidate(comboOf(mods, key));
+        setFailed(false);
         setRecording(false);
         setPending([]);
       } else {
         setPending(mods);
+        if (!isModifierOnly(e)) setHint(key ? NEEDS_MODIFIER : `${e.key === " " ? "Space" : e.key} can't be a shortcut`);
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -61,6 +69,10 @@ export function HotkeyRecorder({ value, onSave, down }: HotkeyRecorderProps) {
     try {
       await onSave(candidate);
       setCandidate(null);
+      setFailed(false);
+    } catch {
+      // The caller has said why; the candidate stays for another try.
+      setFailed(true);
     } finally {
       setBusy(false);
     }
@@ -73,12 +85,18 @@ export function HotkeyRecorder({ value, onSave, down }: HotkeyRecorderProps) {
         onClick={() => {
           setRecording(true);
           setPending([]);
+          setHint(null);
         }}
         aria-pressed={recording}
+        aria-invalid={failed || undefined}
         title={recording ? "Press the new shortcut, Escape to cancel" : "Click to change"}
         className={
           "control flex h-8 min-w-[150px] items-center justify-center gap-1 px-3 text-[13px] " +
-          (recording ? "[box-shadow:inset_0_0_0_1px_var(--accent),0_0_0_3px_var(--accent-soft)]" : "")
+          (recording
+            ? "[box-shadow:inset_0_0_0_1px_var(--accent),0_0_0_3px_var(--accent-soft)]"
+            : failed
+              ? "[box-shadow:inset_0_0_0_1px_var(--danger)]"
+              : "")
         }
       >
         {recording ? (
@@ -88,7 +106,7 @@ export function HotkeyRecorder({ value, onSave, down }: HotkeyRecorderProps) {
               <span className="text-fg-3">+ …</span>
             </span>
           ) : (
-            <span className="text-fg-2">Press a combination…</span>
+            <span className="text-fg-2">{hint ?? "Press a combination…"}</span>
           )
         ) : (
           <span className="flex items-center gap-2">
@@ -107,7 +125,13 @@ export function HotkeyRecorder({ value, onSave, down }: HotkeyRecorderProps) {
           <Button variant="suggested" busy={busy} onClick={() => void save()}>
             Save
           </Button>
-          <Button variant="flat" onClick={() => setCandidate(null)}>
+          <Button
+            variant="flat"
+            onClick={() => {
+              setCandidate(null);
+              setFailed(false);
+            }}
+          >
             Cancel
           </Button>
         </>

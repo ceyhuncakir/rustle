@@ -72,10 +72,17 @@ export type ConfigValue = boolean | number | string | string[];
 // -- command payloads --------------------------------------------------------
 
 export interface Status {
+  /** False when stopped, and when the engine died (see `error`). */
   running: boolean;
   state: string;
+  /** The effective dictation shortcut in the plugin's spelling ("Ctrl+Alt+Space"), on every desktop. */
   hotkey: string;
   version: string;
+  /** A saved setting only applies once the engine restarts. */
+  needs_restart: boolean;
+  session: string;
+  /** Why the engine is not working, e.g. the model failed to load. */
+  error: string | null;
 }
 
 export interface InputDevice {
@@ -209,17 +216,20 @@ export interface StateEvent {
 export interface TextEvent {
   text: string;
 }
+/** To every window while the engine records, and during `wizard_test_mic`. */
 export interface LevelEvent {
   level: number;
 }
+/** Also what `get_download` returns for the download in progress. */
 export interface DownloadEvent {
   id: string;
   file: string;
   received: number;
   total: number;
   done: boolean;
-  error?: string;
+  error?: string | null;
 }
+/** To every window, for each press and release of the shortcut while the engine runs. */
 export interface HotkeyEvent {
   down: boolean;
 }
@@ -245,8 +255,9 @@ export const api = {
 
   // config
   getConfig: () => invoke<Config>("get_config"),
+  /** Resolves to whether the engine must restart for the saved settings to apply. */
   setConfigValue: (section: ConfigSection, key: string, value: ConfigValue) =>
-    invoke<void>("set_config_value", { section, key, value }),
+    invoke<boolean>("set_config_value", { section, key, value }),
   getConfigPath: () => invoke<string>("get_config_path"),
   openConfigFile: () => invoke<void>("open_config_file"),
 
@@ -261,7 +272,11 @@ export const api = {
   // audio + recognition
   listInputDevices: () => invoke<InputDevice[]>("list_input_devices"),
   listSttModels: () => invoke<SttModel[]>("list_stt_models"),
+  /** Starts a download reported over `flow:download`; rejects while another runs. */
   downloadModel: (id: string) => invoke<void>("download_model", { id }),
+  /** The latest progress of the download in progress, or null. */
+  getDownload: () => invoke<DownloadEvent | null>("get_download"),
+  cancelDownload: () => invoke<void>("cancel_download"),
   getComputeReport: () => invoke<ComputeReport>("get_compute_report"),
   detectGpu: () => invoke<GpuReport>("detect_gpu"),
 
@@ -269,6 +284,7 @@ export const api = {
   listProviders: () => invoke<ProviderSpec[]>("list_providers"),
   listProviderModels: (provider: string) => invoke<string[]>("list_provider_models", { provider }),
   getKeySource: (provider: string) => invoke<string>("get_key_source", { provider }),
+  /** Both reject with the reason when the keyring fails. */
   setApiKey: (provider: string, key: string) => invoke<void>("set_api_key", { provider, key }),
   clearApiKey: (provider: string) => invoke<void>("clear_api_key", { provider }),
 
@@ -277,13 +293,16 @@ export const api = {
   forgetHistory: () => invoke<number>("forget_history"),
 
   // desktop
+  /** On GNOME this writes the Shell extension's binding. */
   setHotkey: (combo: string) => invoke<void>("set_hotkey", { combo }),
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (on: boolean) => invoke<void>("set_autostart", { on }),
   getPermissions: () => invoke<Permission[]>("get_permissions"),
+  /** For "hotkey-gnome-extension" this installs and enables the extension; it works after the next login. */
   requestPermission: (id: string) => invoke<void>("request_permission", { id }),
 
   // first-run wizard
+  /** Records about two seconds, emitting `flow:level` meanwhile. */
   wizardTestMic: () => invoke<WizardMicResult | null | undefined>("wizard_test_mic"),
   wizardTestTranscribe: () => invoke<WizardTranscribeResult>("wizard_test_transcribe"),
   wizardTestPaste: () => invoke<WizardPasteResult>("wizard_test_paste"),

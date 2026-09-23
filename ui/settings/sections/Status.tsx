@@ -52,10 +52,13 @@ export function StatusSection() {
             <span className="inline-flex flex-wrap items-center gap-1">
               Running - hold <Keys combo={hotkey} /> and talk
             </span>
+          ) : status?.error ? (
+            "Not running"
           ) : (
             "Stopped"
           )
         }
+        below={status?.error && <p className="selectable mt-2 text-[12.5px] text-danger">{status.error}</p>}
       >
         <Switch id="dictation" checked={running} disabled={switching !== null || !status} onChange={(on) => void toggle(on)} />
       </Row>

@@ -1,6 +1,6 @@
-import { useEffect, useState, type ComponentType } from "react";
-import { api, type Permission } from "../shared/api";
-import { describe } from "../shared/hooks";
+import { useEffect, useRef, useState, type ComponentType } from "react";
+import { api, type Permission, type Status } from "../shared/api";
+import { describe, useInterval } from "../shared/hooks";
 import { LoadFailed, useConfigStore } from "../shared/prefs";
 import { Button, ToastProvider, useToast } from "../shared/ui";
 import { WizardContext } from "./context";
@@ -30,6 +30,11 @@ const STEPS: Step[] = [
   { id: "done", label: "Done", Component: DoneStep },
 ];
 
+// Dictation runs from the Shortcut step on, so the shortcut's dot and the
+// Done step's try-it box work. Reaching either starts the engine, or reloads
+// it when a setting changed since; the steps between leave it running.
+const ENGINE_STEPS = new Set(["hotkey", "done"]);
+
 export function App() {
   return (
     <ToastProvider>
@@ -41,7 +46,9 @@ export function App() {
 function Wizard() {
   const toast = useToast();
   const store = useConfigStore();
-  const [engineHotkey, setEngineHotkey] = useState("");
+  const [status, setStatus] = useState<Status | null>(null);
+  const [starting, setStarting] = useState(false);
+  const engineBusy = useRef(false);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [index, setIndex] = useState(() => {
     const q = new URLSearchParams(location.search).get("step");
@@ -49,6 +56,14 @@ function Wizard() {
     return i >= 0 ? i : 0;
   });
   const [finishing, setFinishing] = useState(false);
+
+  const refreshStatus = async () => {
+    try {
+      setStatus(await api.getStatus());
+    } catch (err) {
+      console.warn("get_status failed", err);
+    }
+  };
 
   const refreshPermissions = async () => {
     try {
@@ -59,12 +74,35 @@ function Wizard() {
   };
 
   useEffect(() => {
-    api.getStatus().then((s) => setEngineHotkey(s.hotkey), () => {});
+    void refreshStatus();
     void refreshPermissions();
   }, []);
 
   const step = STEPS[index]!;
   const last = index === STEPS.length - 1;
+  const engineStep = ENGINE_STEPS.has(step.id);
+
+  useEffect(() => {
+    if (!engineStep || engineBusy.current) return;
+    engineBusy.current = true;
+    setStarting(true);
+    void (async () => {
+      try {
+        const s = await api.getStatus();
+        if (!s.running) await api.setRunning(true);
+        else if (s.needs_restart) await api.restartEngine();
+      } catch (err) {
+        toast(`Could not start Flow: ${describe(err)}`);
+      } finally {
+        engineBusy.current = false;
+        setStarting(false);
+        await refreshStatus();
+      }
+    })();
+  }, [step.id]);
+
+  // A start that looked fine can still fail a moment later (the model).
+  useInterval(() => void refreshStatus(), engineStep ? 3000 : null);
 
   // Stays busy on success: the native side closes the window.
   const finish = async () => {
@@ -92,7 +130,10 @@ function Wizard() {
         config: store.config,
         save: store.save,
         patch: store.patch,
-        hotkey: store.config.desktop.hotkey || engineHotkey,
+        hotkey: status?.hotkey || store.config.desktop.hotkey,
+        status,
+        starting,
+        refreshStatus,
         permissions,
         refreshPermissions,
       }}

@@ -1,6 +1,6 @@
 import { api, type ComputeReport, type GpuReport } from "../../shared/api";
-import { useAsync } from "../../shared/hooks";
-import { DownloadProgress, computePlan, deviceOptions, providerChoice, useModelDownload } from "../../shared/prefs";
+import { detach, useAsync } from "../../shared/hooks";
+import { DownloadProgress, computePlan, deviceOptions, formatMegabytes, providerChoice, useModelDownload } from "../../shared/prefs";
 import { Button, ChoiceRow, Group, Row, Select, descriptionOf, useToast, type Choice, type Option } from "../../shared/ui";
 import { useSettings } from "../context";
 
@@ -29,21 +29,28 @@ export function VoiceSection() {
   const fix = gpu.data && config.stt.provider !== "cpu" ? computePlan(gpu.data, config.stt.provider).fix : null;
 
   const selected = models.data?.find((m) => m.id === config.stt.model) ?? null;
-  const download = useModelDownload(config.stt.model, {
+  const download = useModelDownload({
     onDone: () => {
       toast("Model downloaded");
       void models.reload();
     },
     onError: (message) => toast(`Download failed: ${message}`),
   });
+  const fetching = download.progress ? (models.data?.find((m) => m.id === download.progress?.id) ?? null) : null;
 
-  const modelOptions: Option[] = (models.data ?? []).map((m) => ({ value: m.id, label: m.downloaded ? m.label : `${m.label}  (downloads on first use)` }));
+  const modelOptions: Option[] = (models.data ?? []).map((m) => ({ value: m.id, label: m.downloaded ? m.label : `${m.label}  (not downloaded)` }));
   if (config.stt.model && !models.data?.some((m) => m.id === config.stt.model)) modelOptions.unshift({ value: config.stt.model, label: config.stt.model });
 
-  const chooseModel = async (id: string) => {
-    await save("stt", "model", id, false);
+  // Flow never fetches a model by itself: without the files it cannot dictate.
+  const modelSubtitle = download.progress
+    ? `Downloading ${fetching?.label ?? download.progress.id}…`
+    : selected && !selected.downloaded
+      ? `Not downloaded - Flow can't dictate until you download it (${formatMegabytes(selected.download_mb)})`
+      : (selected?.description ?? (models.loading ? "Loading…" : (models.error ?? "")));
+
+  const chooseModel = (id: string) => {
     const m = models.data?.find((x) => x.id === id);
-    toast(m && !m.downloaded ? "Not downloaded yet - it downloads when Flow starts" : "Saved");
+    return save("stt", "model", id, m && !m.downloaded ? "Saved. Download it before you dictate" : "Saved");
   };
 
   return (
@@ -51,15 +58,22 @@ export function VoiceSection() {
       <Row
         title="Recognition model"
         htmlFor="stt-model"
-        subtitle={selected?.description ?? (models.loading ? "Loading…" : models.error ?? "")}
+        subtitle={modelSubtitle}
         below={download.progress && <DownloadProgress event={download.progress} className="mt-3" />}
       >
-        {selected && !selected.downloaded && (
-          <Button busy={download.progress !== null} onClick={() => void download.start()}>
-            {download.progress ? "Downloading" : "Download"}
+        {download.progress ? (
+          <Button variant="flat" busy={download.cancelling} onClick={() => void download.cancel()}>
+            Cancel
           </Button>
+        ) : (
+          selected &&
+          !selected.downloaded && (
+            <Button variant="suggested" onClick={() => void download.start(selected.id)}>
+              Download
+            </Button>
+          )
         )}
-        <Select id="stt-model" value={config.stt.model} options={modelOptions} onChange={(v) => void chooseModel(v)} />
+        <Select id="stt-model" value={config.stt.model} options={modelOptions} onChange={(v) => detach(chooseModel(v))} />
       </Row>
 
       <ChoiceRow
@@ -69,11 +83,11 @@ export function VoiceSection() {
         subtitle={computeSubtitle(compute.data, gpu.data, config.stt.provider)}
         below={fix && <p className="selectable mt-2 text-[12.5px] text-fg-2">To use the graphics card: {fix}</p>}
         value={providerChoice(config.stt.provider)}
-        onChange={(v) => void save("stt", "provider", v)}
+        onChange={(v) => detach(save("stt", "provider", v))}
       />
 
       <Row title="Microphone" htmlFor="mic" subtitle={devices.error ? `Could not list devices: ${devices.error}` : "Which input to record from"}>
-        <Select id="mic" value={config.audio.device} options={deviceOptions(devices.data, config.audio.device)} onChange={(v) => void save("audio", "device", v)} />
+        <Select id="mic" value={config.audio.device} options={deviceOptions(devices.data, config.audio.device)} onChange={(v) => detach(save("audio", "device", v))} />
       </Row>
     </Group>
   );

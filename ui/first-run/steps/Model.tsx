@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, type GpuReport } from "../../shared/api";
-import { useAction, useAsync } from "../../shared/hooks";
+import { detach, useAction, useAsync } from "../../shared/hooks";
 import { DownloadProgress, computePlan, formatMegabytes, useModelDownload } from "../../shared/prefs";
 import { Button } from "../../shared/ui";
 import { useWizard } from "../context";
@@ -32,7 +32,7 @@ export function ModelStep() {
   const models = useAsync(() => api.listSttModels());
   const gpu = useAsync(() => api.detectGpu());
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  const download = useModelDownload(config.stt.model, { onDone: () => void models.reload(), onError: setDownloadError });
+  const download = useModelDownload({ onDone: () => void models.reload(), onError: setDownloadError });
   const test = useAction(() => api.wizardTestTranscribe());
 
   const selected = models.data?.find((m) => m.id === config.stt.model) ?? null;
@@ -54,7 +54,7 @@ export function ModelStep() {
                   className="accent-accent"
                   checked={active}
                   disabled={downloading}
-                  onChange={() => void save("stt", "model", m.id)}
+                  onChange={() => detach(save("stt", "model", m.id))}
                 />
                 <span className="min-w-0 flex-1">
                   <span className="block text-[14px] font-medium">{m.label}</span>
@@ -70,26 +70,34 @@ export function ModelStep() {
         {models.loading && <li className="px-4 py-3 text-[13px] text-fg-2">Loading…</li>}
       </ul>
 
-      {selected && !selected.downloaded && (
+      {(downloading || (selected && !selected.downloaded) || downloadError) && (
         <div className="mt-4 flex flex-col gap-2">
           {download.progress ? (
-            <DownloadProgress event={download.progress} />
-          ) : (
             <div className="flex items-center gap-3">
-              <Button
-                variant="suggested"
-                onClick={() => {
-                  setDownloadError(null);
-                  void download.start();
-                }}
-              >
-                Download {selected.label}
+              <DownloadProgress event={download.progress} className="min-w-0 flex-1" />
+              <Button variant="flat" busy={download.cancelling} onClick={() => void download.cancel()}>
+                Cancel
               </Button>
-              <span className="text-[13px] text-fg-2">
-                About {formatMegabytes(selected.download_mb)}
-                {selected.precision === "fp32" ? ", the full-precision version the graphics card runs." : "."}
-              </span>
             </div>
+          ) : (
+            selected &&
+            !selected.downloaded && (
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="suggested"
+                  onClick={() => {
+                    setDownloadError(null);
+                    void download.start(selected.id);
+                  }}
+                >
+                  Download {selected.label}
+                </Button>
+                <span className="text-[13px] text-fg-2">
+                  About {formatMegabytes(selected.download_mb)}
+                  {selected.precision === "fp32" ? ", the full-precision version the graphics card runs." : "."}
+                </span>
+              </div>
+            )
           )}
           {downloadError && <Outcome ok={false}>Download failed: {downloadError}</Outcome>}
         </div>

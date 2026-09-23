@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Status } from "../shared/api";
 import { useAction, useInterval } from "../shared/hooks";
 import { LoadFailed, useConfigStore } from "../shared/prefs";
 import { Banner, ToastProvider, useToast } from "../shared/ui";
-import { NEEDS_RESTART, SettingsContext, type SettingsContextValue } from "./context";
+import { SettingsContext, type SettingsContextValue } from "./context";
 import { AboutSection } from "./sections/About";
 import { CleanupSection } from "./sections/Cleanup";
 import { DesktopSection } from "./sections/Desktop";
@@ -24,10 +24,16 @@ function Settings() {
   const store = useConfigStore();
   const [status, setStatus] = useState<Status | null>(null);
   const [needsRestart, setNeedsRestart] = useState(false);
+  const saves = useRef(0);
 
   const refreshStatus = async () => {
+    const seen = saves.current;
     try {
-      setStatus(await api.getStatus());
+      const s = await api.getStatus();
+      setStatus(s);
+      // Rust's flag is the truth (a tray restart clears it), unless a save
+      // landed while this was in flight.
+      if (seen === saves.current) setNeedsRestart(s.needs_restart);
     } catch (err) {
       console.warn("get_status failed", err);
     }
@@ -39,9 +45,10 @@ function Settings() {
   useInterval(() => void refreshStatus(), 3000);
 
   const save: SettingsContextValue["save"] = async (section, key, value, message) => {
-    await store.save(section, key, value);
+    const restart = await store.save(section, key, value);
+    saves.current += 1;
+    if (restart) setNeedsRestart(true);
     if (message !== false) toast(message ?? "Saved");
-    if (NEEDS_RESTART.some(([s, k]) => s === section && k === key)) setNeedsRestart(true);
   };
 
   const restart = useAction(

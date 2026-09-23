@@ -1,5 +1,10 @@
 //! Everything the settings window and the first-run wizard can ask for.
 //! The contract (names, arguments, payloads) is mirrored in `ui/shared/api.ts`.
+//!
+//! Anything that touches a disk, a device, the network or the engine is
+//! `async`: a plain command runs on the main thread, where it would freeze
+//! every window and the tray, and where creating a window deadlocks on
+//! Windows. Only instant, self-contained ones stay plain.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -25,7 +30,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 // -- config -------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_config(shared: App<'_>) -> Config {
     shared.reload_config();
     shared.config()
@@ -57,13 +62,15 @@ fn to_value(value: Json) -> Result<config::Value, String> {
     })
 }
 
-#[tauri::command]
+/// Saves one value. Returns whether the engine must restart for the saved
+/// settings to apply: it reads its config once, when it starts.
+#[tauri::command(async)]
 pub fn set_config_value(shared: App<'_>, section: String, key: String, value: Json) -> Result<bool, String> {
     config::set_value(&section, &key, to_value(value)?).map_err(err)?;
     shared.reload_config();
-    // Recognition changes only take effect when the model is reloaded.
-    let needs_restart = section == "stt" || (section == "audio" && key == "device");
-    if needs_restart && shared.running() {
+    // The shortcut is re-registered live by `set_hotkey`.
+    let live = section == "desktop" && key == "hotkey";
+    if !live && shared.running() {
         shared.needs_restart.store(true, Ordering::SeqCst);
     }
     Ok(shared.needs_restart.load(Ordering::SeqCst))
@@ -74,7 +81,7 @@ pub fn get_config_path() -> String {
     config::config_path().display().to_string()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_config_file(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let path = config::write_default_config().map_err(err)?;
@@ -91,56 +98,42 @@ pub struct Status {
     pub version: String,
     pub needs_restart: bool,
     pub session: String,
+    /// Why dictation is not working (a model failed to load, the shortcut
+    /// is taken), or `None`.
+    pub error: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_status(shared: App<'_>) -> Status {
     let config = shared.config();
+    let session = flow_desktop::session::detect();
     Status {
         running: shared.running(),
         state: shared.state.lock().unwrap().as_str().to_string(),
-        hotkey: current_hotkey(&config),
+        hotkey: current_hotkey(session, &config),
         version: crate::APP_VERSION.to_string(),
         needs_restart: shared.needs_restart.load(Ordering::SeqCst),
-        session: flow_desktop::session::detect().to_string(),
+        session: session.to_string(),
+        error: shared.last_error(),
     }
 }
 
-/// On GNOME the binding lives in the extension's settings.
-pub fn current_hotkey(config: &Config) -> String {
+/// The dictation shortcut in the shortcut plugin's notation, whichever
+/// side owns it: on GNOME it lives in the extension's settings.
+pub fn current_hotkey(session: flow_desktop::Session, config: &Config) -> String {
     #[cfg(target_os = "linux")]
     {
-        if matches!(flow_desktop::session::detect(), flow_desktop::Session::GnomeWayland { .. }) {
-            if let Some(binding) = gnome_binding() {
+        if matches!(session, flow_desktop::Session::GnomeWayland { .. }) {
+            if let Some(binding) = crate::gnome_extension::binding() {
                 return binding;
             }
         }
     }
+    let _ = session;
     config.desktop.hotkey.clone()
 }
 
-#[cfg(target_os = "linux")]
-fn gnome_binding() -> Option<String> {
-    let schemadir = dirs::data_dir()?.join("gnome-shell/extensions/flow@ceyhun.dev/schemas");
-    let out = std::process::Command::new("gsettings")
-        .args([
-            "--schemadir",
-            &schemadir.display().to_string(),
-            "get",
-            "org.gnome.shell.extensions.flow",
-            "toggle-dictation",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&out.stdout);
-    let cleaned: String = raw.chars().filter(|c| !"[]'\"\n".contains(*c)).collect();
-    Some(cleaned.trim().to_string()).filter(|s| !s.is_empty())
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_running(app: AppHandle, shared: App<'_>, on: bool) -> Result<(), String> {
     if on {
         host::start(&shared, Some(&app)).map_err(err)?;
@@ -151,7 +144,7 @@ pub fn set_running(app: AppHandle, shared: App<'_>, on: bool) -> Result<(), Stri
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restart_engine(app: AppHandle, shared: App<'_>) -> Result<(), String> {
     host::restart(&shared, Some(&app)).map_err(err)?;
     crate::tray::sync_toggle(&app);
@@ -160,7 +153,7 @@ pub fn restart_engine(app: AppHandle, shared: App<'_>) -> Result<(), String> {
 
 // -- voice ----------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_input_devices() -> Vec<flow_audio::DeviceInfo> {
     flow_audio::list_devices()
 }
@@ -214,26 +207,68 @@ pub struct DownloadEvent {
     pub error: Option<String>,
 }
 
-/// Fetch a model in the background, reporting through `flow:download`.
-#[tauri::command]
+/// Fetch a model in the background, reporting through `flow:download`. One
+/// download at a time: two would share the cancel switch, and two of the
+/// same model would write the same file.
+#[tauri::command(async)]
 pub fn download_model(app: AppHandle, shared: App<'_>, id: String) -> Result<(), String> {
     if models::stt_model(&id).is_none() {
         return Err(format!("unknown model {id:?}"));
     }
     let precision = flow_stt::gpu::precision_for(&shared.config().stt.provider);
+    {
+        let mut current = shared.download.lock().unwrap();
+        if let Some(running) = current.as_ref() {
+            return Err(format!("{} is already downloading", running.id));
+        }
+        *current = Some(DownloadEvent {
+            id: id.clone(),
+            file: String::new(),
+            received: 0,
+            total: 0,
+            done: false,
+            error: None,
+        });
+    }
     let cancel = shared.download_cancel.clone();
     cancel.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let progress = |file: String, received: u64, total: u64, done: bool, error: Option<String>| {
-            let _ = app
-                .emit("flow:download", DownloadEvent { id: id.clone(), file, received, total, done, error });
+    let slot = shared.download.clone();
+    let spawned = std::thread::Builder::new().name("flow-download".into()).spawn(move || {
+        let report = |event: DownloadEvent| {
+            *slot.lock().unwrap() = (!event.done).then(|| event.clone());
+            let _ = app.emit("flow:download", event);
         };
         let result = flow_stt::download(&id, precision, &cancel, |p: flow_stt::Progress| {
-            progress(p.file, p.received, p.total, false, None);
+            report(DownloadEvent {
+                id: id.clone(),
+                file: p.file,
+                received: p.received,
+                total: p.total,
+                done: false,
+                error: None,
+            });
         });
-        progress(String::new(), 0, 0, true, result.err().map(|e| format!("{e:#}")));
+        report(DownloadEvent {
+            id: id.clone(),
+            file: String::new(),
+            received: 0,
+            total: 0,
+            done: true,
+            error: result.err().map(|e| format!("{e:#}")),
+        });
     });
+    if let Err(e) = spawned {
+        *shared.download.lock().unwrap() = None;
+        return Err(err(e));
+    }
     Ok(())
+}
+
+/// The download in progress as last reported, for a window that opens
+/// halfway through one; `None` when nothing is downloading.
+#[tauri::command]
+pub fn get_download(shared: App<'_>) -> Option<DownloadEvent> {
+    shared.download.lock().unwrap().clone()
 }
 
 /// Stop a running download; the partial file is kept for a later resume.
@@ -242,7 +277,7 @@ pub fn cancel_download(shared: App<'_>) {
     shared.download_cancel.store(true, Ordering::SeqCst);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_compute_report(shared: App<'_>) -> flow_stt::ComputeReport {
     let slot = shared.transcriber.lock().unwrap();
     slot.as_ref().and_then(|(_, t)| t.compute_report()).unwrap_or_else(|| flow_stt::ComputeReport {
@@ -283,7 +318,7 @@ pub fn list_providers() -> Vec<ProviderInfo> {
 
 /// The live model list for a provider, using the current config for the
 /// endpoint / base URL and the stored key.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_provider_models(shared: App<'_>, provider: String) -> Vec<String> {
     let mut cfg = shared.config().cleanup;
     cfg.backend = provider.clone();
@@ -294,20 +329,34 @@ pub fn list_provider_models(shared: App<'_>, provider: String) -> Vec<String> {
     backends::usable_chat_models(&backend.installed_models(), &provider)
 }
 
-#[tauri::command]
+// The keyring can block on an unlock prompt, so these stay off the main
+// thread too.
+#[tauri::command(async)]
 pub fn get_key_source(provider: String) -> String {
     secrets::key_source(&provider)
 }
 
-#[tauri::command]
-pub fn set_api_key(provider: String, key: String) -> bool {
-    secrets::set_key(&provider, &key)
+#[tauri::command(async)]
+pub fn set_api_key(provider: String, key: String) -> Result<(), String> {
+    if secrets::set_key(&provider, &key) {
+        Ok(())
+    } else {
+        Err(KEYRING_FAILED.into())
+    }
 }
 
-#[tauri::command]
-pub fn clear_api_key(provider: String) -> bool {
-    secrets::clear_key(&provider)
+#[tauri::command(async)]
+pub fn clear_api_key(provider: String) -> Result<(), String> {
+    if secrets::clear_key(&provider) {
+        Ok(())
+    } else {
+        Err(KEYRING_FAILED.into())
+    }
 }
+
+const KEYRING_FAILED: &str = "The system keyring refused it. Is a keyring (GNOME Keyring, KWallet, \
+     Keychain, Credential Manager) running and unlocked? You can also export the provider's \
+     environment variable instead.";
 
 // -- learning ---------------------------------------------------------------------
 
@@ -319,7 +368,7 @@ pub struct LearningSummary {
     pub style: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_learning_summary(shared: App<'_>) -> LearningSummary {
     let enabled = shared.config().learning.enabled;
     match flow_core::history::History::open_default() {
@@ -331,7 +380,7 @@ pub fn get_learning_summary(shared: App<'_>) -> LearningSummary {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn forget_history() -> Result<u64, String> {
     let history = flow_core::history::History::open_default().map_err(err)?;
     history.clear().map_err(err)
@@ -339,18 +388,16 @@ pub fn forget_history() -> Result<u64, String> {
 
 // -- doctor, diagnostics, updates ----------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_doctor(shared: App<'_>) -> Vec<Check> {
     let notes = shared.notes.lock().unwrap().clone();
     doctor::run(&shared.config(), &notes, shared.running())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn copy_diagnostics(shared: App<'_>) -> String {
     let text = diagnostics(&shared);
-    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-        let _ = clipboard.set_text(text.clone());
-    }
+    flow_desktop::copy_text(text.clone());
     text
 }
 
@@ -359,6 +406,9 @@ pub fn diagnostics(shared: &Shared) -> String {
     let mut out = format!("Flow {}\n", crate::APP_VERSION);
     out.push_str(&format!("session: {}\n", flow_desktop::session::detect()));
     out.push_str(&format!("config: {}\n", config::config_path().display()));
+    if let Some(error) = shared.last_error() {
+        out.push_str(&format!("error: {error}\n"));
+    }
     out.push_str(&format!("stt: {} / {}\n", config.stt.model, config.stt.provider));
     out.push_str(&format!(
         "cleanup: {} / {} ({})\n",
@@ -404,7 +454,7 @@ pub struct Permission {
     pub help: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_permissions() -> Vec<Permission> {
     let mut list = Vec::new();
     #[cfg(target_os = "linux")]
@@ -416,16 +466,23 @@ pub fn get_permissions() -> Vec<Permission> {
                 label: "Flow GNOME Shell extension".into(),
                 granted: extension,
                 required: true,
-                help: "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Enable it with `gnome-extensions enable flow@ceyhun.dev`, then log out and back in.".into(),
+                help: "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.".into(),
             }),
             Session::KdeWayland | Session::LayerShellWayland | Session::OtherWayland => {
-                let tool = flow_desktop::linux::wayland::detect_tool();
+                // On PATH is not enough: ydotool needs its daemon, dotool
+                // needs /dev/uinput.
+                let tool = flow_desktop::linux::wayland::probe_tool();
                 list.push(Permission {
                     id: "paste-tool".into(),
                     label: "Paste helper (dotool or ydotool)".into(),
-                    granted: tool.is_some(),
+                    granted: tool.is_ok(),
                     required: true,
-                    help: "Wayland lets no ordinary app type into another. Install dotool or ydotool so Flow can send the paste keystroke.".into(),
+                    help: match tool {
+                        Ok(name) => format!("{name} is ready to send the paste keystroke."),
+                        Err(why) => format!(
+                            "Wayland lets no ordinary app type into another, so Flow needs dotool or ydotool to send the paste keystroke. {why}"
+                        ),
+                    },
                 });
                 list.push(Permission {
                     id: "hotkey-wayland".into(),
@@ -443,7 +500,7 @@ pub fn get_permissions() -> Vec<Permission> {
         list.push(Permission {
             id: "accessibility".into(),
             label: "Accessibility".into(),
-            granted: false,
+            granted: macos::accessibility_granted(),
             required: true,
             help: "Needed to paste into other apps. System Settings → Privacy & Security → Accessibility."
                 .into(),
@@ -451,7 +508,7 @@ pub fn get_permissions() -> Vec<Permission> {
         list.push(Permission {
             id: "screen-recording".into(),
             label: "Screen Recording (window titles only)".into(),
-            granted: false,
+            granted: macos::screen_recording_granted(),
             required: false,
             help:
                 "Lets Flow read the focused window's title so the cleanup model can adapt its tone. Optional."
@@ -461,41 +518,156 @@ pub fn get_permissions() -> Vec<Permission> {
     list
 }
 
-#[tauri::command]
-pub fn request_permission(id: String) -> Result<(), String> {
-    warn!("permission request for {id:?} is not implemented on this platform yet");
-    Ok(())
+/// Do what granting a permission takes: install the GNOME extension, or
+/// open the right pane of System Settings on macOS.
+#[tauri::command(async)]
+pub fn request_permission(app: AppHandle, id: String) -> Result<(), String> {
+    match id.as_str() {
+        #[cfg(target_os = "linux")]
+        "hotkey-gnome-extension" => crate::gnome_extension::install(&app).map_err(err),
+        #[cfg(target_os = "macos")]
+        "accessibility" | "screen-recording" => {
+            use tauri_plugin_opener::OpenerExt;
+            if id == "accessibility" {
+                // Asking puts Flow in the list, switched off, for the user to tick.
+                macos::prompt_accessibility();
+            }
+            let pane = if id == "accessibility" { "Privacy_Accessibility" } else { "Privacy_ScreenCapture" };
+            let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+            app.opener().open_url(url, None::<&str>).map_err(err)
+        }
+        "hotkey-wayland" => Err("Global shortcuts on this desktop come in a later version of Flow. Until \
+             then, bind `flow dictate` to a key in your desktop's keyboard settings."
+            .into()),
+        "paste-tool" => Err("Install dotool or ydotool with your package manager (ydotool also needs \
+             its ydotoold service running), then check again."
+            .into()),
+        _ => {
+            let _ = &app;
+            warn!("permission request for {id:?} has nothing to do on this platform");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    //! The two privacy checks macOS answers without asking the user.
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> u8;
+        static kAXTrustedCheckOptionPrompt: *const std::ffi::c_void;
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> u8;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDictionaryCreate(
+            allocator: *const std::ffi::c_void,
+            keys: *const *const std::ffi::c_void,
+            values: *const *const std::ffi::c_void,
+            count: isize,
+            key_callbacks: *const std::ffi::c_void,
+            value_callbacks: *const std::ffi::c_void,
+        ) -> *const std::ffi::c_void;
+        fn CFRelease(cf: *const std::ffi::c_void);
+        static kCFBooleanTrue: *const std::ffi::c_void;
+        static kCFTypeDictionaryKeyCallBacks: u8;
+        static kCFTypeDictionaryValueCallBacks: u8;
+    }
+
+    pub fn accessibility_granted() -> bool {
+        // SAFETY: takes no arguments and only reads the TCC database.
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    pub fn screen_recording_granted() -> bool {
+        // SAFETY: as above; available since macOS 10.15, below our minimum.
+        unsafe { CGPreflightScreenCaptureAccess() != 0 }
+    }
+
+    /// Shows the system's own "Flow would like to control this computer"
+    /// prompt, which also adds Flow to the Accessibility list.
+    pub fn prompt_accessibility() {
+        // SAFETY: a one-entry CFDictionary built from constant CF objects,
+        // with the standard CFType callbacks, released after use.
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                std::ptr::addr_of!(kCFTypeDictionaryKeyCallBacks).cast(),
+                std::ptr::addr_of!(kCFTypeDictionaryValueCallBacks).cast(),
+            );
+            if !options.is_null() {
+                AXIsProcessTrustedWithOptions(options);
+                CFRelease(options);
+            }
+        }
+    }
 }
 
 // -- hotkey and autostart ------------------------------------------------------------
 
-#[tauri::command]
+/// Change the dictation shortcut. Nothing changes unless the new one can
+/// be had: a combination another app owns must not leave Flow with none,
+/// or stop it from starting next time.
+#[tauri::command(async)]
 pub fn set_hotkey(app: AppHandle, shared: App<'_>, combo: String) -> Result<(), String> {
-    // Validate before saving: a bad combination must not brick startup.
-    combo
-        .parse::<tauri_plugin_global_shortcut::Shortcut>()
-        .map_err(|e| format!("{combo:?} is not a valid shortcut: {e}"))?;
-    config::set_value("desktop", "hotkey", combo.clone()).map_err(err)?;
-    shared.reload_config();
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
-    let mut guard = shared.engine.lock().unwrap();
-    if let Some(running) = guard.as_mut() {
-        if let Some(old) = running.shortcut.take() {
-            host::unregister_shortcut(&app, &old);
-        }
-        host::register_shortcut(&app, &combo, running.tx.clone()).map_err(err)?;
-        running.shortcut = Some(combo);
+    let parsed = combo.parse::<Shortcut>().map_err(|e| format!("{combo:?} is not a valid shortcut: {e}"))?;
+
+    // On GNOME the extension owns the shortcut; it rebinds as soon as its
+    // setting changes.
+    #[cfg(target_os = "linux")]
+    if matches!(flow_desktop::session::detect(), flow_desktop::Session::GnomeWayland { extension: true }) {
+        return crate::gnome_extension::set_binding(&combo).map_err(err);
     }
+
+    // The engine's sender and current shortcut, without holding the lock
+    // while the plugin registers (which can wait for the main thread).
+    let engine = shared.engine.lock().unwrap().as_ref().map(|r| (r.tx.clone(), r.shortcut.clone()));
+    match engine {
+        Some((_, Some(old))) if old == combo => {}
+        Some((tx, old)) => {
+            host::register_shortcut(&app, &combo, tx).map_err(err)?;
+            if let Some(old) = old {
+                host::unregister_shortcut(&app, &old);
+            }
+            if let Some(running) = shared.engine.lock().unwrap().as_mut() {
+                running.shortcut = Some(combo.clone());
+            }
+        }
+        None => {
+            // Not running: check it can be had, then let it go again.
+            app.global_shortcut()
+                .register(parsed)
+                .map_err(|e| format!("could not use {combo:?}: {e} - another app may own it"))?;
+            let _ = app.global_shortcut().unregister(parsed);
+        }
+    }
+    config::set_value("desktop", "hotkey", combo).map_err(err)?;
+    shared.reload_config();
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_autostart(app: AppHandle) -> bool {
     use tauri_plugin_autostart::ManagerExt;
     app.autolaunch().is_enabled().unwrap_or(false)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let launcher = app.autolaunch();
@@ -504,21 +676,36 @@ pub fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
 
 // -- first-run wizard ------------------------------------------------------------------
 
-/// Record from the configured microphone for a fixed time. Returns the take
-/// and the loudest level seen.
-fn record_for(config: &Config, seconds: u64) -> Result<(Vec<f32>, f32), String> {
+/// Record from the configured microphone for a fixed time, showing the
+/// level live in the windows as `flow:level`. Returns the take and the
+/// loudest level seen.
+fn record_for(app: &AppHandle, config: &Config, seconds: f32) -> Result<(Vec<f32>, f32), String> {
+    use flow_core::engine::Event;
+
     let (tx, rx) = std::sync::mpsc::channel();
     let mut recorder = host::recorder(config, tx);
     recorder.start().map_err(err)?;
-    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
+    let mut peak = 0.0f32;
+    let mut broken = None;
+    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(Event::Level(level)) => {
+                peak = peak.max(level);
+                let _ = app.emit("flow:level", serde_json::json!({ "level": level }));
+            }
+            Ok(Event::MicError(message)) => {
+                broken = Some(message);
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
     let take = recorder.stop();
-    let peak = rx
-        .try_iter()
-        .filter_map(|ev| match ev {
-            flow_core::engine::Event::Level(l) => Some(l),
-            _ => None,
-        })
-        .fold(0.0f32, f32::max);
+    if let Some(message) = broken {
+        return Err(format!("the microphone stopped: {message}"));
+    }
     Ok((take, peak))
 }
 
@@ -529,16 +716,20 @@ pub struct MicTest {
     pub detail: String,
 }
 
-/// Record one second and report how loud it was.
-#[tauri::command]
-pub fn wizard_test_mic(shared: App<'_>) -> Result<MicTest, String> {
+/// A peak below this is a muted or wrong microphone, not a quiet voice.
+const SILENT: f32 = 0.02;
+
+/// Record two seconds and report how loud it was.
+#[tauri::command(async)]
+pub fn wizard_test_mic(app: AppHandle, shared: App<'_>) -> Result<MicTest, String> {
     let config = shared.config();
-    let (take, peak) = record_for(&config, 1)?;
+    let (take, peak) = record_for(&app, &config, 2.0)?;
     let seconds = take.len() as f32 / config.audio.sample_rate as f32;
-    let ok = seconds > 0.5;
-    let detail = if !ok {
+    let captured = seconds > 1.0;
+    let ok = captured && peak >= SILENT;
+    let detail = if !captured {
         format!("only {seconds:.2}s captured - is the microphone in use elsewhere?")
-    } else if peak < 0.02 {
+    } else if peak < SILENT {
         "captured audio, but it was silent - check the input level".into()
     } else {
         format!("heard you: peak level {:.0}%", peak * 100.0)
@@ -553,12 +744,12 @@ pub struct TranscribeTest {
 }
 
 /// Record for three seconds and recognise it, loading the model if needed.
-#[tauri::command]
-pub fn wizard_test_transcribe(shared: App<'_>) -> Result<TranscribeTest, String> {
+#[tauri::command(async)]
+pub fn wizard_test_transcribe(app: AppHandle, shared: App<'_>) -> Result<TranscribeTest, String> {
     let config = shared.config();
     let transcriber = host::transcriber(&shared, &config);
     transcriber.load().map_err(err)?;
-    let (take, _) = record_for(&config, 3)?;
+    let (take, _) = record_for(&app, &config, 3.0)?;
     let started = std::time::Instant::now();
     let text = transcriber.transcribe(&take, config.audio.sample_rate).map_err(err)?;
     Ok(TranscribeTest { text, seconds: started.elapsed().as_secs_f32() })
@@ -573,7 +764,7 @@ pub struct PasteTest {
 
 /// Paste a marker into whatever is focused (the wizard's own text field)
 /// and check the clipboard came back.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn wizard_test_paste(shared: App<'_>) -> Result<PasteTest, String> {
     let config = shared.config();
     let backends = flow_desktop::build(&config.desktop).map_err(err)?;
@@ -601,7 +792,7 @@ pub struct CleanupTest {
     pub sample: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn wizard_test_cleanup(shared: App<'_>) -> CleanupTest {
     let cleaner = flow_core::cleanup::build_cleaner(&shared.config().cleanup);
     let (ok, why) = cleaner.available();
@@ -615,13 +806,16 @@ pub fn wizard_test_cleanup(shared: App<'_>) -> CleanupTest {
     CleanupTest { ok: true, sample }
 }
 
-#[tauri::command]
+/// Start dictating and close the wizard. The engine starts first, so a
+/// failure (say, a shortcut another app owns) is shown in the wizard rather
+/// than lost behind a closed window.
+#[tauri::command(async)]
 pub fn wizard_complete(app: AppHandle, shared: App<'_>) -> Result<(), String> {
+    host::start(&shared, Some(&app)).map_err(err)?;
+    crate::tray::sync_toggle(&app);
     host::mark_first_run_done().map_err(err)?;
     if let Some(window) = tauri::Manager::get_webview_window(&app, crate::windows::FIRST_RUN) {
         let _ = window.close();
     }
-    host::start(&shared, Some(&app)).map_err(err)?;
-    crate::tray::sync_toggle(&app);
     Ok(())
 }

@@ -104,6 +104,14 @@ export function useInterval(fn: () => void, ms: number | null): void {
   }, [ms]);
 }
 
+/**
+ * Fire and forget a call that tells the user itself when it fails (a toast,
+ * as `save` does), so its rejection is not left unhandled.
+ */
+export function detach(promise: Promise<unknown>): void {
+  promise.catch(() => {});
+}
+
 export function describe(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;

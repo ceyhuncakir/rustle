@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../../shared/api";
-import { describe, useAction, useEvent } from "../../shared/hooks";
+import { describe, detach, useAction, useEvent } from "../../shared/hooks";
 import { AutostartSwitch } from "../../shared/prefs";
 import { Button, ChoiceRow, Group, HotkeyRecorder, Row, useToast, type Choice } from "../../shared/ui";
 import { useSettings } from "../context";
@@ -17,8 +17,10 @@ export function DesktopSection() {
   const [down, setDown] = useState(false);
   useEvent("flow:hotkey", ({ down }) => setDown(down));
 
-  const hotkey = config.desktop.hotkey || status?.hotkey || "";
+  // What the engine (or on GNOME the Shell extension) actually listens for.
+  const hotkey = status?.hotkey || config.desktop.hotkey;
 
+  // Rethrows so the recorder keeps the combination for another try.
   const saveHotkey = async (combo: string) => {
     try {
       await api.setHotkey(combo);
@@ -45,7 +47,7 @@ export function DesktopSection() {
         <HotkeyRecorder value={hotkey} onSave={saveHotkey} down={status?.running ? down : undefined} />
       </Row>
 
-      <ChoiceRow id="overlay" title="Overlay" choices={OVERLAY} value={config.desktop.overlay} onChange={(v) => void save("desktop", "overlay", v)} />
+      <ChoiceRow id="overlay" title="Overlay" choices={OVERLAY} value={config.desktop.overlay} onChange={(v) => detach(save("desktop", "overlay", v))} />
 
       <Row title="Launch at login" htmlFor="autostart" subtitle="Start Flow in the background when you sign in">
         <AutostartSwitch id="autostart" onSaved={(on) => toast(on ? "Flow will start when you log in" : "Flow will not start at login")} />

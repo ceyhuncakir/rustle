@@ -29,9 +29,12 @@ export default defineConfig({
         "first-run": page("first-run"),
       },
       output: {
+        // React gets a chunk of its own; ui/shared is split by Rollup along
+        // the import graph, so the overlay loads neither React nor the
+        // settings' components, and mock.ts (imported dynamically, only
+        // outside Tauri) stays out of every page's static imports.
         manualChunks(id) {
           if (id.includes("node_modules/react") || id.includes("node_modules/scheduler")) return "react";
-          if (id.includes("/ui/shared/")) return "shared";
           return undefined;
         },
       },

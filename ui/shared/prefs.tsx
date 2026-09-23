@@ -1,7 +1,7 @@
 // What the settings window and the first-run wizard have in common: the
 // config store, and the controls that wrap one Rust command each.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Config, type ConfigSection, type ConfigValue, type DownloadEvent, type GpuReport, type InputDevice } from "./api";
 import { describe, useAsync, useEvent } from "./hooks";
 import { Button, Progress, Switch, formatBytes, useToast, type Option } from "./ui";
@@ -13,8 +13,11 @@ export interface ConfigStore {
   error: string | null;
   /** Mirror a value locally without writing it (for values Rust wrote itself). */
   patch: (section: ConfigSection, key: string, value: ConfigValue) => void;
-  /** Write one key and mirror it locally. Toasts and rethrows on failure. */
-  save: (section: ConfigSection, key: string, value: ConfigValue) => Promise<void>;
+  /**
+   * Write one key and mirror it locally. Resolves to whether the engine must
+   * restart for it to apply. Toasts and rethrows on failure.
+   */
+  save: (section: ConfigSection, key: string, value: ConfigValue) => Promise<boolean>;
 }
 
 /** Load config.toml once and keep a local copy in step with every write. */
@@ -32,13 +35,15 @@ export function useConfigStore(): ConfigStore {
   };
 
   const save: ConfigStore["save"] = async (section, key, value) => {
+    let restart: boolean;
     try {
-      await api.setConfigValue(section, key, value);
+      restart = await api.setConfigValue(section, key, value);
     } catch (err) {
       toast(`Could not save: ${describe(err)}`);
       throw err;
     }
     patch(section, key, value);
+    return restart === true;
   };
 
   return { config, error, patch, save };
@@ -62,39 +67,43 @@ export function LoadFailed({ title, error }: { title: string; error: string }) {
 /**
  * Where one provider's API key comes from ("keyring", "not set", "$VAR" or ""
  * while unknown), and a way to replace it. Pass null to leave the keyring alone.
+ * `error` is why the keyring last refused, for showing beside the field: it
+ * is too long for a toast.
  */
 export function useApiKey(provider: string | null) {
   const toast = useToast();
   const [source, setSource] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   const load = (p: string) => api.getKeySource(p).then(setSource, () => setSource(""));
 
   useEffect(() => {
+    setError(null);
     if (provider !== null) void load(provider);
   }, [provider]);
 
-  /** Store the key, or remove it when empty. Resolves to whether a key is now stored. */
+  /**
+   * Store the key, or remove it when empty. Resolves to whether a key is now
+   * stored; rejects when the keyring refuses, with `error` set.
+   */
   const apply = async (key: string): Promise<boolean> => {
     if (provider === null) return false;
     const trimmed = key.trim();
+    setError(null);
     try {
-      if (trimmed) {
-        // Keys go to the OS keyring, never into config.toml.
-        await api.setApiKey(provider, trimmed);
-        toast("Saved to the keyring");
-      } else {
-        await api.clearApiKey(provider);
-        toast("API key removed");
-      }
-      await load(provider);
-      return trimmed !== "";
+      // Keys go to the OS keyring, never into config.toml.
+      if (trimmed) await api.setApiKey(provider, trimmed);
+      else await api.clearApiKey(provider);
     } catch (err) {
-      toast(`Could not write to the keyring: ${describe(err)}`);
-      return false;
+      setError(describe(err));
+      throw err;
     }
+    toast(trimmed ? "Saved to the keyring" : "API key removed");
+    await load(provider);
+    return trimmed !== "";
   };
 
-  return { source, fromEnv: source.startsWith("$"), apply };
+  return { source, fromEnv: source.startsWith("$"), error, apply };
 }
 
 // -- where recognition runs ---------------------------------------------------
@@ -142,29 +151,51 @@ export function formatMegabytes(mb: number): string {
 // -- recognition model download ---------------------------------------------
 
 interface DownloadHandlers {
-  onDone: () => void;
+  onDone: (id: string) => void;
   onError: (message: string) => void;
 }
 
-/** Start and follow the download of one recognition model over `flow:download`. */
-export function useModelDownload(id: string, handlers: DownloadHandlers) {
+/**
+ * Start, follow and cancel the recognition model download over
+ * `flow:download`. Only one runs at a time, whichever window started it, and
+ * one already under way when this mounts is picked up where it is.
+ */
+export function useModelDownload(handlers: DownloadHandlers) {
   const [progress, setProgress] = useState<DownloadEvent | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  // Read by the event handler, which can run before a re-render.
+  const cancelled = useRef(false);
+
+  useEffect(() => {
+    let live = true;
+    api.getDownload().then(
+      (ev) => {
+        // An event that arrived meanwhile is newer.
+        if (live && ev && !ev.done && !ev.error) setProgress((p) => p ?? ev);
+      },
+      (err) => console.warn("get_download failed", err),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEvent("flow:download", (ev) => {
-    if (ev.id !== id) return;
-    if (ev.error) {
-      setProgress(null);
-      handlers.onError(ev.error);
-    } else if (ev.done) {
-      setProgress(null);
-      handlers.onDone();
-    } else {
+    if (!ev.done && !ev.error) {
       setProgress(ev);
+      return;
     }
+    const stopped = cancelled.current || /cancel/i.test(ev.error ?? "");
+    cancelled.current = false;
+    setProgress(null);
+    setCancelling(false);
+    if (!ev.error) handlers.onDone(ev.id);
+    else if (!stopped) handlers.onError(ev.error);
   });
 
-  const start = async () => {
-    setProgress({ id, file: "", received: 0, total: 0, done: false });
+  const start = async (id: string) => {
+    cancelled.current = false;
+    setProgress({ id, file: "", received: 0, total: 0, done: false, error: null });
     try {
       await api.downloadModel(id);
     } catch (err) {
@@ -173,7 +204,20 @@ export function useModelDownload(id: string, handlers: DownloadHandlers) {
     }
   };
 
-  return { progress: progress?.id === id ? progress : null, start };
+  /** Stop it; the progress stays until the download says it has stopped. */
+  const cancel = async () => {
+    cancelled.current = true;
+    setCancelling(true);
+    try {
+      await api.cancelDownload();
+    } catch (err) {
+      cancelled.current = false;
+      setCancelling(false);
+      handlers.onError(describe(err));
+    }
+  };
+
+  return { progress, cancelling, start, cancel };
 }
 
 /** A progress bar with the file being fetched and the byte count under it. */

@@ -1,10 +1,11 @@
 import { useState } from "react";
+import { displayCombo } from "../../shared/hotkey";
 import { Keys } from "../../shared/ui";
 import { useWizard } from "../context";
-import { StepHeader } from "./StepHeader";
+import { Outcome, StepHeader } from "./StepHeader";
 
 export function DoneStep() {
-  const { hotkey, config } = useWizard();
+  const { hotkey, config, status, starting } = useWizard();
   const [text, setText] = useState("");
 
   return (
@@ -18,9 +19,19 @@ export function DoneStep() {
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={5}
-          placeholder={`Hold ${hotkey} and talk here`}
+          placeholder={`Hold ${displayCombo(hotkey)} and talk here`}
           className="control w-full resize-none rounded-card px-4 py-3 text-[15px] leading-relaxed placeholder:text-fg-3"
         />
+        {starting ? (
+          <p className="mt-2 text-[13px] text-fg-2">Starting Flow…</p>
+        ) : (
+          status &&
+          !status.running && (
+            <div className="mt-2">
+              <Outcome ok={false}>{status.error ?? "Flow is not running."}</Outcome>
+            </div>
+          )
+        )}
       </div>
       <dl className="mt-6 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 text-[13px]">
         <dt className="text-fg-2">Recognition</dt>

@@ -22,8 +22,10 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu(app, false)?)
         .tooltip("Flow")
         .show_menu_on_left_click(true)
+        // Menu events arrive on the main thread, which starting and stopping
+        // the engine may wait for; see `host`. So the work goes elsewhere.
         .on_menu_event(|app, event| match event.id().as_ref() {
-            ITEM_TOGGLE => {
+            ITEM_TOGGLE => in_background(app, |app| {
                 let shared = app.state::<Arc<Shared>>();
                 if shared.running() {
                     crate::host::turn_off(&shared, Some(app));
@@ -32,13 +34,13 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
                     crate::windows::notify(app, "Flow could not start", &format!("{err:#}"));
                 }
                 sync_toggle(app);
-            }
+            }),
             ITEM_SETTINGS => crate::windows::open_settings(app),
             ITEM_DOCTOR => crate::windows::open_settings(app),
-            ITEM_QUIT => {
+            ITEM_QUIT => in_background(app, |app| {
                 crate::host::stop(&app.state::<Arc<Shared>>(), Some(app));
                 app.exit(0);
-            }
+            }),
             _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
@@ -51,6 +53,13 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     builder.build(app)?;
     sync_toggle(app);
     Ok(())
+}
+
+fn in_background(app: &AppHandle, work: impl FnOnce(&AppHandle) + Send + 'static) {
+    let app = app.clone();
+    if let Err(err) = std::thread::Builder::new().name("flow-tray".into()).spawn(move || work(&app)) {
+        warn!("could not act on the tray menu: {err}");
+    }
 }
 
 /// Menu items cannot be updated in place portably, so the menu is rebuilt

@@ -3,10 +3,18 @@
 //! Works with or without a Tauri `AppHandle`: the headless mode on GNOME has
 //! no windows at all, so anything that needs the app (the webview overlay,
 //! the global-shortcut plugin) is optional here.
+//!
+//! The tray, the settings window, the wizard and a signal can all ask to
+//! start or stop the engine at once, so those are serialised by
+//! [`Shared::lifecycle`]. Whoever holds it may wait for the main thread
+//! (creating the overlay window, registering a shortcut), so the main thread
+//! itself must never block on it: the tray hands the work to a thread, and
+//! the exit path only tries the lock.
 
+use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use flow_core::backends;
@@ -17,7 +25,7 @@ use flow_core::history::History;
 use flow_core::learning::Learner;
 use flow_desktop::{Backends, HotkeySource, OverlayChoice};
 use log::{info, warn};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 /// Everything the commands, the tray and the CLI share.
 pub struct Shared {
@@ -31,6 +39,15 @@ pub struct Shared {
     pub needs_restart: AtomicBool,
     /// Raised by `cancel_download`; the downloader polls it.
     pub download_cancel: Arc<AtomicBool>,
+    /// The download in progress as last reported, so a window opened
+    /// mid-download can pick it up. `None` when nothing is downloading.
+    pub download: Arc<Mutex<Option<crate::commands::DownloadEvent>>>,
+    /// Why dictation is not working, for the status row. Cleared on start.
+    pub last_error: Arc<Mutex<Option<String>>>,
+    /// Held while the engine starts or stops; see the module docs.
+    pub lifecycle: Mutex<()>,
+    /// Whether a thread already waits for the GNOME extension to appear.
+    pub watching_extension: AtomicBool,
 }
 
 pub struct Running {
@@ -40,6 +57,8 @@ pub struct Running {
     pub shortcut: Option<String>,
     /// Unloads a local cleanup model if Flow dies before the engine can.
     pub watchdog: Option<crate::watchdog::Watchdog>,
+    /// Held for as long as this engine runs; see [`claim_engine`].
+    pub _claim: Option<File>,
 }
 
 impl Shared {
@@ -56,6 +75,10 @@ impl Shared {
             transcriber: Mutex::new(None),
             needs_restart: AtomicBool::new(false),
             download_cancel: Arc::default(),
+            download: Arc::default(),
+            last_error: Arc::default(),
+            lifecycle: Mutex::new(()),
+            watching_extension: AtomicBool::new(false),
         }
     }
 
@@ -70,8 +93,22 @@ impl Shared {
         self.config.lock().unwrap().clone()
     }
 
+    /// Whether an engine is up. One whose thread ended - its models failed
+    /// to load - is not, even before anyone cleans it up.
     pub fn running(&self) -> bool {
-        self.engine.lock().unwrap().is_some()
+        self.engine.lock().unwrap().as_ref().is_some_and(|r| !r.thread.is_finished())
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().unwrap().clone()
+    }
+
+    fn set_error(&self, error: Option<String>) {
+        *self.last_error.lock().unwrap() = error;
+    }
+
+    fn lifecycle(&self) -> MutexGuard<'_, ()> {
+        self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -99,6 +136,12 @@ impl Overlay for Tracking {
         self.inner.set_text(text);
     }
     fn push_level(&self, level: f32) {
+        if let Some(app) = &self.app {
+            // The wizard and the settings window draw the level too.
+            for window in [crate::windows::FIRST_RUN, crate::windows::SETTINGS] {
+                let _ = app.emit_to(window, "flow:level", serde_json::json!({ "level": level }));
+            }
+        }
         self.inner.push_level(level);
     }
 }
@@ -151,16 +194,20 @@ pub fn assemble(
     tx: Sender<Event>,
     rx: Receiver<Event>,
 ) -> anyhow::Result<Engine> {
-    let (history, learner) = if config.learning.enabled {
-        let history = Arc::new(History::open_default()?);
-        let learner = (config.cleanup.enabled && config.cleanup.backend != "none").then(|| {
+    // Learning must never stand in the way of dictation: a damaged or
+    // locked history database only turns it off for this run.
+    let history = config.learning.enabled.then(History::open_default).and_then(|opened| match opened {
+        Ok(history) => Some(Arc::new(history)),
+        Err(err) => {
+            warn!("history unavailable, learning is off until restart: {err:#}");
+            None
+        }
+    });
+    let learner =
+        (history.is_some() && config.cleanup.enabled && config.cleanup.backend != "none").then(|| {
             let backend: Arc<dyn backends::Backend> = Arc::from(backends::build_backend(&config.cleanup));
             Arc::new(Learner::new(backend))
         });
-        (Some(history), learner)
-    } else {
-        (None, None)
-    };
 
     Ok(Engine::with_channel(
         config.clone(),
@@ -181,9 +228,26 @@ pub fn assemble(
 
 /// Build everything and start the engine thread.
 pub fn start(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
+    let _lifecycle = shared.lifecycle();
+    start_locked(shared, app)
+}
+
+fn start_locked(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
     if shared.running() {
         return Ok(());
     }
+    // An engine whose thread already ended still holds its shortcut.
+    stop_locked(shared, app);
+    shared.set_error(None);
+    let result = launch(shared, app);
+    if let Err(err) = &result {
+        shared.set_error(Some(format!("{err:#}")));
+    }
+    result
+}
+
+fn launch(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
+    let claim = claim_engine()?;
     shared.reload_config();
     let config = shared.config();
 
@@ -191,6 +255,10 @@ pub fn start(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
     *shared.notes.lock().unwrap() = backends.notes.clone();
     for note in &backends.notes {
         info!("desktop: {note}");
+    }
+    #[cfg(target_os = "linux")]
+    if let (flow_desktop::Session::GnomeWayland { extension: false }, Some(app)) = (backends.session, app) {
+        watch_for_extension(app);
     }
 
     let (tx, rx) = mpsc::channel::<Event>();
@@ -216,7 +284,7 @@ pub fn start(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
     let mut shortcut = None;
     match backends.hotkey {
         HotkeySource::Builtin(mut builtin) => {
-            builtin.start(tx.clone())?;
+            builtin.start(relay_hotkeys(app, tx.clone()))?;
             hotkey = Some(builtin);
         }
         HotkeySource::AppShortcut(combo) => match app {
@@ -238,26 +306,163 @@ pub fn start(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
     // does not leave it in video memory.
     let watchdog = crate::watchdog::Watchdog::spawn(&config.cleanup);
 
-    let thread = std::thread::Builder::new().name("flow-engine".into()).spawn({
+    let spawned = std::thread::Builder::new().name("flow-engine".into()).spawn({
         let app = app.cloned();
+        let last_error = shared.last_error.clone();
         move || {
             if let Err(err) = engine.prepare() {
                 log::error!("engine failed to prepare: {err:#}");
+                *last_error.lock().unwrap() = Some(format!("{err:#}"));
                 if let Some(app) = &app {
                     crate::windows::notify(app, "Flow could not load its models", &format!("{err:#}"));
+                    // The thread ends here, so the tray should stop saying "ready".
+                    let handle = app.clone();
+                    let _ = app.run_on_main_thread(move || crate::tray::sync_toggle(&handle));
                 }
                 return;
             }
             engine.run();
         }
-    })?;
+    });
+    let thread = match spawned {
+        Ok(thread) => thread,
+        Err(err) => {
+            if let (Some(app), Some(combo)) = (app, shortcut.as_deref()) {
+                unregister_shortcut(app, combo);
+            }
+            return Err(err.into());
+        }
+    };
 
-    *shared.engine.lock().unwrap() = Some(Running { tx, thread, hotkey, shortcut, watchdog });
+    *shared.engine.lock().unwrap() =
+        Some(Running { tx, thread, hotkey, shortcut, watchdog, _claim: Some(claim) });
     shared.needs_restart.store(false, Ordering::SeqCst);
     Ok(())
 }
 
+/// Only one engine may run per user. The background service and the app,
+/// or two copies of either, would otherwise both paste every dictation and
+/// both hold a model in video memory. The OS drops the lock however the
+/// process ends.
+fn claim_engine() -> anyhow::Result<File> {
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("engine.lock");
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let how = if cfg!(target_os = "linux") {
+                " Stop the other one first; for the background service that is `systemctl --user stop flow`."
+            } else {
+                " Quit the other one first."
+            };
+            anyhow::bail!("Flow is already dictating in another process.{how}")
+        }
+        // A filesystem without locks should not stop dictation.
+        Err(std::fs::TryLockError::Error(err)) => {
+            warn!("could not lock {}: {err}; carrying on", path.display());
+            Ok(file)
+        }
+    }
+}
+
+/// Hand hotkey events from a desktop backend on to the engine, telling the
+/// windows too: the wizard lights a dot while the shortcut is held.
+fn relay_hotkeys(app: Option<&AppHandle>, engine: Sender<Event>) -> Sender<Event> {
+    let Some(app) = app.cloned() else { return engine };
+    let (tx, rx) = mpsc::channel::<Event>();
+    let relay = engine.clone();
+    let spawned = std::thread::Builder::new().name("flow-hotkeys".into()).spawn(move || {
+        for event in rx {
+            if let Event::Hotkey(hotkey) = &event {
+                emit_hotkey(&app, *hotkey);
+            }
+            if relay.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    match spawned {
+        Ok(_) => tx,
+        Err(err) => {
+            warn!("could not relay hotkeys to the windows: {err}");
+            engine
+        }
+    }
+}
+
+pub fn emit_hotkey(app: &AppHandle, event: HotkeyEvent) {
+    let down = match event {
+        HotkeyEvent::Down | HotkeyEvent::Pressed => true,
+        HotkeyEvent::Up | HotkeyEvent::Released => false,
+        HotkeyEvent::Cancel => return,
+    };
+    let _ = app.emit("flow:hotkey", serde_json::json!({ "down": down }));
+}
+
+/// GNOME without Flow's extension has no hotkey. The extension can turn up
+/// later - enabled from the wizard, or simply slower than Flow at login -
+/// so wait for it and then restart onto it.
+#[cfg(target_os = "linux")]
+fn watch_for_extension(app: &AppHandle) {
+    let shared = tauri::Manager::state::<Arc<Shared>>(app).inner().clone();
+    if shared.watching_extension.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    let watcher = shared.clone();
+    let spawned = std::thread::Builder::new().name("flow-extension-watch".into()).spawn(move || {
+        let shared = watcher;
+        loop {
+            if flow_desktop::linux::gnome::wait_for_extension(std::time::Duration::from_secs(60)) {
+                info!("Flow's GNOME Shell extension appeared: restarting onto it");
+                if shared.running() {
+                    if let Err(err) = restart(&shared, Some(&app)) {
+                        warn!("could not restart onto the extension: {err:#}");
+                    }
+                    crate::tray::sync_toggle(&app);
+                }
+                break;
+            }
+            if !shared.running() {
+                break;
+            }
+        }
+        shared.watching_extension.store(false, Ordering::SeqCst);
+    });
+    if spawned.is_err() {
+        shared.watching_extension.store(false, Ordering::SeqCst);
+    }
+}
+
 pub fn stop(shared: &Shared, app: Option<&AppHandle>) {
+    let _lifecycle = shared.lifecycle();
+    stop_locked(shared, app);
+}
+
+/// For the exit path, which runs on the main thread: stop unless a start
+/// or stop is under way, since that one may be waiting for this very
+/// thread. The process ends either way; the watchdog unloads Ollama then.
+pub fn stop_for_exit(shared: &Shared, app: Option<&AppHandle>) -> bool {
+    match shared.lifecycle.try_lock() {
+        Ok(_lifecycle) => {
+            stop_locked(shared, app);
+            true
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            let _lifecycle = poisoned.into_inner();
+            stop_locked(shared, app);
+            true
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            warn!("exiting while the engine starts or stops; leaving it to the OS");
+            false
+        }
+    }
+}
+
+fn stop_locked(shared: &Shared, app: Option<&AppHandle>) {
     let Some(mut running) = shared.engine.lock().unwrap().take() else { return };
     if let Some(hotkey) = running.hotkey.as_mut() {
         hotkey.stop();
@@ -272,7 +477,8 @@ pub fn stop(shared: &Shared, app: Option<&AppHandle>) {
     }
     *shared.state.lock().unwrap() = State::Hidden;
     if let Some(app) = app {
-        crate::tray::reflect_state(app, State::Hidden);
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || crate::tray::reflect_state(&handle, State::Hidden));
     }
 }
 
@@ -281,7 +487,8 @@ pub fn stop(shared: &Shared, app: Option<&AppHandle>) {
 /// costs nothing. Switching on loads it again, in a second or two. A restart
 /// for a settings change goes through [`restart`] instead and keeps it.
 pub fn turn_off(shared: &Shared, app: Option<&AppHandle>) {
-    stop(shared, app);
+    let _lifecycle = shared.lifecycle();
+    stop_locked(shared, app);
     let transcriber = shared.transcriber.lock().unwrap().as_ref().map(|(_, t)| t.clone());
     if let Some(transcriber) = transcriber {
         transcriber.unload();
@@ -325,8 +532,9 @@ pub fn on_termination(shutdown: impl FnOnce() + Send + 'static) {
 }
 
 pub fn restart(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
-    stop(shared, app);
-    start(shared, app)
+    let _lifecycle = shared.lifecycle();
+    stop_locked(shared, app);
+    start_locked(shared, app)
 }
 
 /// Register the dictation shortcut with the app's global-shortcut plugin and
@@ -338,10 +546,13 @@ pub fn register_shortcut(app: &AppHandle, combo: &str, tx: Sender<Event>) -> any
         combo.parse().map_err(|e| anyhow::anyhow!("shortcut {combo:?} not understood: {e}"))?;
     app.global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, event| {
-            let down = matches!(event.state(), ShortcutState::Pressed);
+            let hotkey = match event.state() {
+                ShortcutState::Pressed => HotkeyEvent::Down,
+                ShortcutState::Released => HotkeyEvent::Up,
+            };
             // The first-run wizard shows a live down/up indicator.
-            let _ = tauri::Emitter::emit(app, "flow:hotkey", serde_json::json!({ "down": down }));
-            let _ = tx.send(Event::Hotkey(if down { HotkeyEvent::Down } else { HotkeyEvent::Up }));
+            emit_hotkey(app, hotkey);
+            let _ = tx.send(Event::Hotkey(hotkey));
         })
         .map_err(|e| anyhow::anyhow!("could not register {combo:?}: {e} - another app may own it"))?;
     info!("shortcut registered: {combo}");

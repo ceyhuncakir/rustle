@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { api } from "../../shared/api";
-import { plural, useAction, useAsync } from "../../shared/hooks";
+import { detach, plural, useAction, useAsync } from "../../shared/hooks";
 import { useApiKey } from "../../shared/prefs";
 import { Button, Select, TextField } from "../../shared/ui";
 import { useWizard } from "../context";
@@ -47,7 +47,7 @@ export function CleanupStep() {
   const option = (value: Choice, title: ReactNode, subtitle: ReactNode, body?: ReactNode) => (
     <li>
       <label className="flex cursor-default items-start gap-3 px-4 py-3">
-        <input type="radio" name="cleanup" className="mt-[3px] accent-accent" checked={choice === value} onChange={() => void pick(value)} />
+        <input type="radio" name="cleanup" className="mt-[3px] accent-accent" checked={choice === value} onChange={() => detach(pick(value))} />
         <span className="min-w-0 flex-1">
           <span className="block text-[14px] font-medium">{title}</span>
           <span className="block text-[12.5px] text-fg-2">{subtitle}</span>
@@ -90,7 +90,7 @@ export function CleanupStep() {
                 options={cloud.map((p) => ({ value: p.key, label: p.label }))}
                 onChange={(v) => {
                   setCloudKey(v);
-                  void pick("cloud", v);
+                  detach(pick("cloud", v));
                 }}
               />
             </label>
@@ -106,7 +106,8 @@ export function CleanupStep() {
                 {apiKey.fromEnv && <span className="ml-2 text-[12.5px] text-fg-2">using {apiKey.source}</span>}
                 {apiKey.source === "keyring" && <span className="ml-2 text-[12.5px] text-success">saved</span>}
               </div>
-              {!apiKey.fromEnv && <TextField key={cloudKey} value="" secret clearOnApply placeholder="Paste the key" onApply={async (k) => void (await apiKey.apply(k))} />}
+              {!apiKey.fromEnv && <TextField key={cloudKey} value="" secret clearOnApply placeholder="Paste the key" onApply={apiKey.apply} />}
+              {apiKey.error && <p className="selectable mt-1.5 text-[12.5px] text-danger">{apiKey.error}</p>}
             </div>
             {spec?.note && <p className="text-[12.5px] text-fg-2">{spec.note}</p>}
           </div>,

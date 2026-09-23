@@ -3,7 +3,8 @@
 // Every command in api.ts is answered here with plausible data, and the
 // overlay events are emitted on a timer so the pill can be watched in a
 // normal browser tab. `?state=listening&text=...` on the overlay page pins
-// one state instead of cycling, which is how the screenshots are taken.
+// one state instead of cycling, which is how the screenshots are taken;
+// `?running=0` starts with the engine off.
 
 import type {
   Config,
@@ -73,10 +74,12 @@ const config: Config = {
     app_rules: {},
   },
   learning: { enabled: false, min_dictations: 15, refresh_every: 25, max_terms: 40 },
-  desktop: { overlay: "auto", hotkey: "Super+D", push_to_talk: true },
+  desktop: { overlay: "auto", hotkey: "Ctrl+Alt+Space", push_to_talk: true },
 };
 
 let running = params.get("running") !== "0";
+let needsRestart = false;
+let engineError: string | null = null;
 let hotkey = config.desktop.hotkey;
 let overlayState = "hidden";
 let speaking = false;
@@ -84,14 +87,16 @@ let autostart = false;
 const keys = new Map<string, string>();
 const envKeys = new Set<string>(["openrouter"]); // pretend $OPENROUTER_API_KEY is exported
 const downloaded = new Set<string>(["nemo-parakeet-tdt-0.6b-v3"]);
+let download: DownloadEvent | null = null;
+let cancelDownload = false;
 
 const permissions: Permission[] = [
   {
-    id: "hotkey-portal",
-    label: "Global shortcut",
+    id: "hotkey-gnome-extension",
+    label: "Flow GNOME Shell extension",
     granted: false,
     required: true,
-    help: "Flow registers the shortcut through the desktop's global-shortcuts portal. Approve the dialog the desktop shows, or bind it yourself in Settings > Keyboard.",
+    help: "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.",
   },
   {
     id: "accessibility",
@@ -230,6 +235,18 @@ let learning: LearningSummary = {
 
 type Args = Record<string, unknown>;
 
+/** Like the engine: it reads its config once, when it starts. */
+function start(): void {
+  needsRestart = false;
+  if (!downloaded.has(config.stt.model)) {
+    running = false;
+    engineError = `the recognition model ${config.stt.model} is not downloaded`;
+    throw new Error(engineError);
+  }
+  running = true;
+  engineError = null;
+}
+
 /** Pretend to record for `ms`, so the level meters show speech meanwhile. */
 async function speak<T>(ms: number, result: T): Promise<T> {
   speaking = true;
@@ -246,19 +263,31 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_config_value: ({ section, key, value }) => {
     (config[section as ConfigSection] as unknown as Record<string, ConfigValue>)[key as string] = value as ConfigValue;
     if (section === "desktop" && key === "hotkey") hotkey = String(value);
+    else if (running) needsRestart = true;
+    return needsRestart;
   },
   get_config_path: () => "/home/you/.config/flow/config.toml",
   open_config_file: () => undefined,
 
-  get_status: () => ({ running, state: running ? overlayState : "hidden", hotkey, version: "0.3.0" }) satisfies Status,
+  get_status: () =>
+    ({
+      running,
+      state: running ? overlayState : "hidden",
+      hotkey,
+      version: "0.3.0",
+      needs_restart: needsRestart,
+      session: "mock",
+      error: engineError,
+    }) satisfies Status,
   set_running: async ({ on }) => {
     await sleep(400);
-    running = Boolean(on);
+    if (on) start();
+    else running = false;
   },
   restart_engine: async () => {
     running = false;
     await sleep(900);
-    running = true;
+    start();
   },
   run_doctor: async () => {
     await sleep(700);
@@ -294,7 +323,12 @@ const commands: Record<string, (args: Args) => unknown> = {
     await sleep(300);
     return gpu;
   },
-  download_model: ({ id }) => void fakeDownload(String(id)),
+  download_model: ({ id }) => {
+    if (download) throw new Error(`${download.id} is already downloading`);
+    void fakeDownload(String(id));
+  },
+  get_download: () => download,
+  cancel_download: () => void (cancelDownload = true),
   get_compute_report: () => {
     const requested = config.stt.provider;
     const onGpu = requested === "gpu" || requested === "cuda" || (requested !== "cpu" && gpu.usable);
@@ -315,7 +349,11 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (providers.some((x) => x.key === p && !x.needs_api_key)) return "not needed";
     return keys.get(p) ? "keyring" : "not set";
   },
-  set_api_key: ({ provider, key }) => void keys.set(String(provider), String(key)),
+  set_api_key: ({ provider, key }) => {
+    // Paste "fail" to see how a keyring refusal looks.
+    if (key === "fail") throw new Error("The system keyring refused it. Is a keyring running and unlocked?");
+    keys.set(String(provider), String(key));
+  },
   clear_api_key: ({ provider }) => void keys.delete(String(provider)),
 
   get_learning_summary: () => ({ ...learning, enabled: config.learning.enabled }),
@@ -334,11 +372,12 @@ const commands: Record<string, (args: Args) => unknown> = {
   get_permissions: () => permissions.map((p) => ({ ...p })),
   request_permission: async ({ id }) => {
     await sleep(600);
+    // The extension only runs after the next login.
     const p = permissions.find((x) => x.id === id);
-    if (p) p.granted = true;
+    if (p && id !== "hotkey-gnome-extension") p.granted = true;
   },
 
-  wizard_test_mic: () => speak(1800, { ok: true, peak: 0.62, detail: "Heard you clearly" }),
+  wizard_test_mic: () => speak(2000, { ok: true, peak: 0.62, detail: "heard you: peak level 62%" }),
   wizard_test_transcribe: () => speak(2600, { text: "Testing one two three, can you hear me?", seconds: 2.4 }),
   wizard_test_paste: async () => {
     await sleep(500);
@@ -381,20 +420,22 @@ function ensureTimers(): void {
 
   // Levels: a quiet room with bursts of speech whenever something is
   // "listening", so the meters have something to show.
+  // Like the engine, levels only flow while something records.
   let t = 0;
   window.setInterval(() => {
     if (!handlers.get("flow:level")?.size) return;
+    if (!speaking && overlayState !== "listening") return;
     t += 0.04;
-    const talking = speaking || overlayState === "listening";
-    const envelope = talking ? 0.35 + 0.3 * Math.sin(t * 3.1) * Math.sin(t * 0.7) : 0.02;
-    const level = Math.max(0, Math.min(1, envelope + (Math.random() - 0.5) * (talking ? 0.35 : 0.03)));
+    const envelope = 0.35 + 0.3 * Math.sin(t * 3.1) * Math.sin(t * 0.7);
+    const level = Math.max(0, Math.min(1, envelope + (Math.random() - 0.5) * 0.35));
     emit("flow:level", { level });
   }, 40);
 
-  // Hotkey: down for a second every four, so the wizard's indicator moves.
+  // Hotkey: down for a second every four while the engine runs, so the
+  // wizard's indicator moves.
   let down = false;
   window.setInterval(() => {
-    if (!handlers.get("flow:hotkey")?.size) return;
+    if (!handlers.get("flow:hotkey")?.size || !running) return;
     down = !down;
     emit("flow:hotkey", { down });
     if (down) window.setTimeout(() => emit("flow:hotkey", { down: (down = false) }), 1100);
@@ -437,6 +478,11 @@ function startOverlayCycle(): void {
   window.setTimeout(step, 300);
 }
 
+function report(event: DownloadEvent): void {
+  download = event.done ? null : event;
+  emit("flow:download", event);
+}
+
 async function fakeDownload(id: string): Promise<void> {
   const files: Array<[string, number]> = [
     ["nemo128.onnx", 1_400_000],
@@ -445,13 +491,19 @@ async function fakeDownload(id: string): Promise<void> {
     ["encoder-model.onnx.data", 60_000_000],
     ["decoder_joint-model.onnx", 18_000_000],
   ];
+  cancelDownload = false;
+  download = { id, file: "", received: 0, total: 0, done: false, error: null };
   for (const [file, total] of files) {
     const steps = Math.max(2, Math.round(total / 120_000_000));
     for (let s = 1; s <= steps; s++) {
       await sleep(120);
-      emit("flow:download", { id, file, received: Math.round((total * s) / steps), total, done: false } satisfies DownloadEvent);
+      if (cancelDownload) {
+        report({ id, file: "", received: 0, total: 0, done: true, error: "download cancelled" });
+        return;
+      }
+      report({ id, file, received: Math.round((total * s) / steps), total, done: false, error: null });
     }
   }
   downloaded.add(id);
-  emit("flow:download", { id, file: "", received: 0, total: 0, done: true } satisfies DownloadEvent);
+  report({ id, file: "", received: 0, total: 0, done: true, error: null });
 }

@@ -3,8 +3,11 @@ import { Button } from "./Button";
 
 interface TextFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange"> {
   value: string;
-  /** Called when the user presses Enter or clicks Save. */
-  onApply: (value: string) => void | Promise<void>;
+  /**
+   * Called when the user presses Enter or clicks Save. Reject (after telling
+   * the user why) to keep what was typed for another try.
+   */
+  onApply: (value: string) => void | Promise<unknown>;
   /** Mask the value; a small eye toggle reveals it. */
   secret?: boolean;
   /** Empty the field once saved - for secrets that are never read back. */
@@ -16,6 +19,7 @@ export function TextField({ value, onApply, secret, clearOnApply, className, ...
   const [draft, setDraft] = useState(value);
   const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   // A new saved value replaces whatever was being typed.
   const [seen, setSeen] = useState(value);
@@ -30,7 +34,11 @@ export function TextField({ value, onApply, secret, clearOnApply, className, ...
     setBusy(true);
     try {
       await onApply(draft);
+      setFailed(false);
       if (clearOnApply) setDraft(value);
+    } catch {
+      // The caller has said why; the draft stays.
+      setFailed(true);
     } finally {
       setBusy(false);
     }
@@ -38,15 +46,22 @@ export function TextField({ value, onApply, secret, clearOnApply, className, ...
 
   return (
     <div className={"flex items-center gap-2 " + (className ?? "")}>
-      <div className="control flex h-8 min-w-0 flex-1 items-center gap-1 pr-1">
+      <div className={"control flex h-8 min-w-0 flex-1 items-center gap-1 pr-1 " + (failed ? "[box-shadow:inset_0_0_0_1px_var(--danger)]" : "")}>
         <input
           {...rest}
           type={secret && !shown ? "password" : "text"}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          aria-invalid={failed || undefined}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setFailed(false);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") void apply();
-            if (e.key === "Escape") setDraft(value);
+            if (e.key === "Escape") {
+              setDraft(value);
+              setFailed(false);
+            }
           }}
           className="h-full min-w-0 flex-1 bg-transparent text-[13.5px] outline-none placeholder:text-fg-3"
           autoComplete="off"

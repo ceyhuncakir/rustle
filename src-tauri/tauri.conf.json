@@ -33,6 +33,9 @@
     "linux": {
       "deb": {
         "desktopTemplate": "../packaging/flow.desktop.template"
+      },
+      "rpm": {
+        "desktopTemplate": "../packaging/flow.desktop.template"
       }
     },
     "macOS": {

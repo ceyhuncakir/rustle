@@ -56,6 +56,19 @@ fn gpu_check(provider: &str, gpu: &GpuReport) -> Result<String, String> {
 pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     let mut checks = Vec::new();
 
+    // A value that does not fit is skipped rather than failing the whole
+    // file, so say which.
+    checks.push(check(
+        "Config",
+        match Config::load_with_warnings() {
+            Ok((_, warnings)) if warnings.is_empty() => {
+                Ok(flow_core::config::config_path().display().to_string())
+            }
+            Ok((_, warnings)) => Err(warnings.join("; ")),
+            Err(err) => Err(format!("{err:#}")),
+        },
+    ));
+
     // Desktop integration.
     let session = flow_desktop::session::detect();
     let desktop = match flow_desktop::build_for(session, &config.desktop) {
@@ -67,6 +80,22 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
         Err(err) => Err(format!("{session}: {err:#}")),
     };
     checks.push(check("Desktop", desktop));
+    // Outside GNOME's extension, Wayland pastes through a helper program,
+    // and one merely on PATH may still be unable to type.
+    #[cfg(target_os = "linux")]
+    {
+        use flow_desktop::Session;
+        if matches!(
+            session,
+            Session::KdeWayland
+                | Session::LayerShellWayland
+                | Session::OtherWayland
+                | Session::GnomeWayland { extension: false }
+        ) {
+            let tool = flow_desktop::linux::wayland::probe_tool();
+            checks.push(check("Paste", tool.map(|name| format!("{name} sends the paste keystroke"))));
+        }
+    }
     for note in notes {
         checks.push(Check { name: "Desktop".into(), ok: true, detail: note.clone() });
     }

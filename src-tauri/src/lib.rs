@@ -5,6 +5,8 @@ pub mod cli;
 pub mod commands;
 pub mod doctor;
 pub mod eval;
+#[cfg(target_os = "linux")]
+pub mod gnome_extension;
 pub mod host;
 pub mod overlay;
 pub mod tray;
@@ -48,6 +50,7 @@ pub fn run() {
             commands::list_input_devices,
             commands::list_stt_models,
             commands::download_model,
+            commands::get_download,
             commands::cancel_download,
             commands::get_compute_report,
             commands::detect_gpu,
@@ -108,8 +111,9 @@ pub fn run() {
             // model), then hand the GPU back.
             tauri::RunEvent::Exit => {
                 if let Some(shared) = app.try_state::<Arc<Shared>>() {
-                    host::stop(&shared, Some(app));
-                    host::release_gpu(&shared);
+                    if host::stop_for_exit(&shared, Some(app)) {
+                        host::release_gpu(&shared);
+                    }
                 }
             }
             _ => {}
@@ -121,6 +125,19 @@ pub fn run() {
 /// signal asks it to do (`systemctl --user stop flow`, Ctrl-C).
 pub fn run_headless() -> i32 {
     let shared = Shared::load();
+    // At login Flow can be quicker than the Shell; without the extension
+    // there is no shortcut. Failing lets systemd try again shortly.
+    #[cfg(target_os = "linux")]
+    if gnome_without_extension() {
+        info!("waiting for Flow's GNOME Shell extension");
+        if !flow_desktop::linux::gnome::wait_for_extension(std::time::Duration::from_secs(30)) {
+            error!(
+                "Flow's GNOME Shell extension is not running. Enable it with `gnome-extensions enable {}` and log out and back in.",
+                gnome_extension::UUID
+            );
+            return 1;
+        }
+    }
     match host::start(&shared, None) {
         Ok(()) => {}
         Err(err) => {
@@ -144,4 +161,11 @@ pub fn run_headless() -> i32 {
     host::release_gpu(&shared);
     info!("stopped");
     0
+}
+
+/// A GNOME session whose Shell does not (yet) run Flow's extension.
+#[cfg(target_os = "linux")]
+fn gnome_without_extension() -> bool {
+    let gnome = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_ascii_lowercase().contains("gnome"));
+    gnome && !flow_desktop::linux::gnome::extension_present()
 }

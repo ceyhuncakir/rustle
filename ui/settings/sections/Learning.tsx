@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../../shared/api";
-import { plural, useAction, useAsync } from "../../shared/hooks";
+import { detach, plural, useAction, useAsync } from "../../shared/hooks";
 import { Button, Group, Row, Switch, useToast } from "../../shared/ui";
 import { useSettings } from "../context";
 
@@ -28,7 +28,7 @@ export function LearningSection() {
   return (
     <Group title="Learning" description="Off by default. While off, nothing you dictate is stored.">
       <Row title="Learn my vocabulary" htmlFor="learning" subtitle="Picks up your jargon and how you write, and uses both">
-        <Switch id="learning" checked={config.learning.enabled} onChange={(on) => void save("learning", "enabled", on)} />
+        <Switch id="learning" checked={config.learning.enabled} onChange={(on) => detach(save("learning", "enabled", on))} />
       </Row>
       <Row title="What it has learned" subtitle={learned}>
         {confirm ? (

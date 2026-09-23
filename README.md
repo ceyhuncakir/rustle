@@ -28,7 +28,7 @@ where:
 | Platform | State |
 |---|---|
 | Linux, GNOME Wayland | **Works.** The Shell extension draws the island and delivers the hotkey; the app talks to it over D-Bus. Daily-driver tested. |
-| Linux, X11 | Built, not yet verified on a real session. |
+| Linux, X11 | Built, not yet verified on a real session. GNOME on X11 uses the extension when it runs. |
 | Linux, KDE / Hyprland / other Wayland | Built without a global hotkey yet; pasting needs `dotool` or `ydotool`. Planned for a later milestone. |
 | Windows | Built through CI, not yet verified on a machine. |
 | macOS | Built through CI, not yet verified on a machine; non-activating panel and permission prompts still to come. |
@@ -61,15 +61,21 @@ those libraries on the loader path, under `/usr/local/cuda` and in pip's
 the GPU out.
 
 Log out and back in once so GNOME loads the extension (Wayland cannot
-hot-load one). Then either:
+hot-load one). The deb, rpm and AppImage carry the extension too; the setup
+wizard installs it for you, and the same log-out applies. Then either:
 
 ```sh
 systemctl --user start flow       # headless: the extension is the whole UI
 flow                              # or the tray app with the settings window and wizard
 ```
 
+Only one of them dictates at a time; the second says so and leaves the
+shortcut to the first.
+
 Press **Super+D** and talk. Hold it and it stops when you let go; tap it and
-it stops on the next tap. **Super+Escape** cancels.
+it stops on the next tap. **Super+Ctrl+Escape** cancels. Elsewhere the
+shortcut is **Ctrl+Alt+Space** (**Option+D** on a Mac), and the settings
+window changes it on every desktop.
 
 Cleanup is optional. For the local model, install Ollama and pull one:
 
@@ -152,7 +158,10 @@ flow learning on|off|status · flow vocab [--forget X] · flow learn · flow his
 ## Configuration
 
 `config.toml` in `~/.config/flow` (Linux), `~/Library/Application Support/flow`
-(macOS) or `%APPDATA%\flow` (Windows). The settings window edits it in place
+(macOS) or `%APPDATA%\flow` (Windows); models and the history database live
+in `~/.local/share/flow`, the same folder on macOS, and `%LOCALAPPDATA%\flow`
+on Windows. A value in the file that does not fit is skipped on its own and
+`flow doctor` names it. The settings window edits the file in place
 and keeps the comments; the file is still the nicer way to set per-app rules
 and the dictionary. The parts worth knowing:
 
@@ -168,8 +177,9 @@ and the dictionary. The parts worth knowing:
   `cpu` never tries. For a CUDA build, CUDA libraries somewhere unusual can
   be named in `FLOW_CUDA_LIBS` (a path list).
 - `[desktop] overlay` - `auto`, `window` or `off` (ignored on GNOME).
-- `[desktop] hotkey` - the shortcut, except on GNOME where it lives in the
-  extension's settings.
+- `[desktop] hotkey` - the shortcut: `Ctrl+Alt+Space` by default, `Option+D`
+  (`Alt+D`) on macOS. On GNOME it lives in the extension's settings instead,
+  and the settings window changes it there.
 
 ## What the cleanup pass does
 
@@ -199,7 +209,8 @@ mines two things from them with the cleanup model: the names a general
 recogniser gets wrong, and one sentence describing how you write. Both feed
 back into the prompt. Every mined term must appear at least twice in your
 own history before it is kept, and `flow vocab --forget` blocks a term for
-good. While learning is off, nothing you dictate is stored.
+good. While learning is off, nothing you dictate is stored. What you
+dictate never goes to the log either, unless you ask for it with `-v`.
 
 ## Development
 
@@ -225,7 +236,8 @@ See [THIRD_PARTY.md](THIRD_PARTY.md). Flow itself is MIT licensed.
   is lost.
 - On GNOME, dictating with the Overview open pastes into the Overview search
   entry.
-- GNOME extensions break across major GNOME releases; expect a fix-up at 50.
+- GNOME extensions break across major GNOME releases. The extension is declared
+  for GNOME 47 to 51, but has only run on 48.
 - English and Dutch by choice; Parakeet v3 covers 25 European languages and
   a third one is transcribed rather than rejected.
 - The cleanup model adds latency proportional to output length. Recognition
