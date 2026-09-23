@@ -75,6 +75,11 @@ impl History {
     fn connect(&self) -> rusqlite::Result<Connection> {
         let db = Connection::open(&self.path)?;
         db.busy_timeout(Duration::from_secs(5))?;
+        // SQLite normally only marks deleted rows free, leaving the words in
+        // the file until something happens to overwrite them. This zeroes
+        // them instead - for a clear, and for a profile entry rewritten when
+        // a term is forgotten.
+        db.pragma_update(None, "secure_delete", true)?;
         Ok(db)
     }
 
@@ -130,6 +135,10 @@ impl History {
         tx.execute("DELETE FROM dictation", [])?;
         tx.execute("DELETE FROM profile", [])?;
         tx.commit()?;
+        // "Delete everything" should leave nothing to recover: secure_delete
+        // zeroed the rows, and rebuilding the file hands the emptied pages
+        // back rather than keeping them around.
+        db.execute_batch("VACUUM")?;
         Ok(removed)
     }
 
@@ -239,6 +248,54 @@ mod tests {
         assert_eq!(store.clear().unwrap(), 1);
         assert_eq!(store.count().unwrap(), 0);
         assert_eq!(store.get_profile("vocabulary").unwrap(), None);
+    }
+
+    /// The raw bytes of the database file.
+    fn file_bytes(store: &History) -> Vec<u8> {
+        std::fs::read(&store.path).unwrap()
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn clearing_leaves_no_text_in_the_file() {
+        // A plain DELETE only marks rows free, and the words stay readable in
+        // the file until something happens to overwrite them.
+        let (_dir, store) = store();
+        for i in 0..50 {
+            store
+                .record(
+                    &format!("raw secret {i}"),
+                    &format!("Marmalade-{i} ledger."),
+                    &context("Slack", "#dm"),
+                )
+                .unwrap();
+        }
+        store.set_profile("vocabulary", &json!(["Marmalade"]), 50).unwrap();
+        assert!(contains(&file_bytes(&store), "Marmalade-7 ledger."));
+        store.clear().unwrap();
+        let bytes = file_bytes(&store);
+        assert!(!contains(&bytes, "Marmalade"));
+        assert!(!contains(&bytes, "raw secret"));
+        // Still a working store afterwards.
+        store.record("a", "b", &FocusContext::default()).unwrap();
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn rewriting_a_profile_entry_leaves_no_old_value_behind() {
+        // Forgetting a term rewrites the vocabulary; the old list must not
+        // linger in a free page.
+        // The old list is much longer than the new one, so the new row cannot
+        // happen to land on top of it.
+        let (_dir, store) = store();
+        let mut terms = vec!["Zanzibar-Quokka".to_string()];
+        terms.extend((0..30).map(|i| format!("Filler-term-{i}")));
+        store.set_profile("vocabulary", &json!(terms), 3).unwrap();
+        store.set_profile("vocabulary", &json!(["Ptyxis"]), 3).unwrap();
+        assert!(!contains(&file_bytes(&store), "Zanzibar-Quokka"));
     }
 
     #[test]

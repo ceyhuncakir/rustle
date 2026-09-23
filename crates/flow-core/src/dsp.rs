@@ -58,6 +58,11 @@ pub fn resample(audio: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
     if source_rate == target_rate || audio.is_empty() {
         return audio.to_vec();
     }
+    // One side comes from config.toml. A zero there would make the output
+    // length infinite, and asking for usize::MAX samples aborts the process.
+    if source_rate == 0 || target_rate == 0 {
+        return Vec::new();
+    }
 
     let ratio = source_rate as f64 / target_rate as f64;
     let width = ratio.round() as usize;
@@ -234,5 +239,12 @@ mod tests {
     #[test]
     fn resample_handles_empty_input() {
         assert!(resample(&[], 48000, 16000).is_empty());
+    }
+
+    #[test]
+    fn resample_survives_a_zero_rate() {
+        let a = tone(220.0, 0.1, SR, 0.3);
+        assert!(resample(&a, 0, SR).is_empty());
+        assert!(resample(&a, SR, 0).is_empty());
     }
 }

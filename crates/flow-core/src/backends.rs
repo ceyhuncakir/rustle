@@ -304,10 +304,22 @@ fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
+/// Bounds on a request timeout. The cleanup timeout comes from
+/// config.toml, where it can be anything TOML can spell - `inf` and `nan`
+/// included, and thinking multiplies it by four - and `Duration` panics on
+/// anything infinite, NaN or too large.
+const MIN_TIMEOUT_SECS: f32 = 1.0;
+const MAX_TIMEOUT_SECS: f32 = 600.0;
+
+fn timeout(secs: f32) -> Duration {
+    // NaN says nothing about how long to wait, so it gets the patient end.
+    let secs = if secs.is_nan() { MAX_TIMEOUT_SECS } else { secs.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS) };
+    Duration::from_secs_f32(secs)
+}
+
 /// Send with a timeout and insist on a 2xx.
 fn send(request: RequestBuilder, timeout_secs: f32) -> Result<Response, Failure> {
-    let timeout = Duration::from_secs_f32(timeout_secs.max(0.0));
-    let response = request.timeout(timeout).send().map_err(Failure::Transport)?;
+    let response = request.timeout(timeout(timeout_secs)).send().map_err(Failure::Transport)?;
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -759,9 +771,17 @@ pub fn build_backend(config: &CleanupConfig) -> Box<dyn Backend> {
         return Box::new(AnthropicBackend::new(&config.model));
     }
     if provider(backend).is_some_and(|p| p.needs_api_key) {
-        return Box::new(OpenAICompatibleBackend::new(&config.model, backend, Some(&config.base_url)));
+        return Box::new(openai_compatible(config));
     }
     Box::new(OllamaBackend::new(&config.model, &config.endpoint, &config.keep_alive))
+}
+
+/// Only "custom" is handed the configured base URL. It stays in the file
+/// after switching to a named provider, and passing it on would send that
+/// provider's key to whatever host the custom one pointed at.
+fn openai_compatible(config: &CleanupConfig) -> OpenAICompatibleBackend {
+    let base_url = (config.backend == "custom").then_some(config.base_url.as_str());
+    OpenAICompatibleBackend::new(&config.model, &config.backend, base_url)
 }
 
 #[cfg(test)]
@@ -863,9 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn named_providers_get_their_own_address() {
-        // The config's base_url is empty for every provider but "custom", and
-        // an empty one must not shadow the provider's own address.
+    fn an_empty_address_does_not_shadow_the_providers_own() {
         for (backend, url) in [
             ("openrouter", Some("https://openrouter.ai/api/v1")),
             ("deepseek", Some("https://api.deepseek.com")),
@@ -873,6 +891,37 @@ mod tests {
         ] {
             assert_eq!(OpenAICompatibleBackend::new("x", backend, Some("")).base_url(), url, "{backend}");
         }
+    }
+
+    #[test]
+    fn switching_away_from_custom_leaves_its_address_behind() {
+        // base_url survives in the file after the switch. Honouring it would
+        // send the OpenAI, DeepSeek or OpenRouter key to the old custom host.
+        let stale = "https://old-custom.example/v1";
+        for (backend, url) in [
+            ("openrouter", Some("https://openrouter.ai/api/v1")),
+            ("deepseek", Some("https://api.deepseek.com")),
+            ("openai", None),
+            ("custom", Some(stale)),
+        ] {
+            let config = CleanupConfig { base_url: stale.into(), ..cfg(backend, "x") };
+            assert_eq!(openai_compatible(&config).base_url(), url, "{backend}");
+        }
+    }
+
+    #[test]
+    fn timeouts_from_the_config_cannot_panic() {
+        // TOML can spell inf and nan, and thinking multiplies by four.
+        assert_eq!(timeout(f32::INFINITY), Duration::from_secs(600));
+        assert_eq!(timeout(f32::NAN), Duration::from_secs(600));
+        assert_eq!(timeout(f32::MAX * 4.0), Duration::from_secs(600));
+        assert_eq!(timeout(f32::NEG_INFINITY), Duration::from_secs(1));
+        assert_eq!(timeout(-5.0), Duration::from_secs(1));
+        assert_eq!(timeout(0.0), Duration::from_secs(1));
+        assert_eq!(timeout(20.0), Duration::from_secs(20));
+        // And through a real backend: fails cleanly, does not panic.
+        let backend = OllamaBackend::new("m", "http://127.0.0.1:1", "1h");
+        assert!(backend.complete("s", "p", f32::INFINITY, true).is_err());
     }
 
     #[test]

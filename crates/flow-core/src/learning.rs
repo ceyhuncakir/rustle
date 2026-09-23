@@ -212,7 +212,11 @@ impl Learner {
 
     /// Re-mine both halves of the profile and store them.
     ///
-    /// Returns `(terms, style_note)`; empty when nothing could be learned.
+    /// Returns the profile now in effect, `(terms, style_note)`. A half that
+    /// failed or came back empty keeps what was learned before, both in the
+    /// store and in what is returned, so one flaky model call cannot wipe a
+    /// profile built up over weeks. Both are empty only when nothing has
+    /// ever been learned.
     pub fn refresh(&self, history: &History, max_terms: usize) -> anyhow::Result<(Vec<String>, String)> {
         let samples = history.samples_for_learning(DEFAULT_SAMPLE_LIMIT)?;
         if samples.is_empty() {
@@ -224,15 +228,23 @@ impl Learner {
             string_list(history.get_profile(BLOCKED_KEY)?).iter().map(|t| t.to_lowercase()).collect();
         let terms: Vec<String> = terms.into_iter().filter(|t| !blocked.contains(&t.to_lowercase())).collect();
         let style = self.profile_style(&samples);
-
-        if !terms.is_empty() {
-            history.set_profile(VOCAB_KEY, &json!(terms), samples.len() as u64)?;
-        }
-        if !style.is_empty() {
-            history.set_profile(STYLE_KEY, &json!(style), samples.len() as u64)?;
-        }
-
         info!("learned {} terms and a style note from {} dictations", terms.len(), samples.len());
+
+        let terms = if terms.is_empty() {
+            string_list(history.get_profile(VOCAB_KEY)?)
+        } else {
+            history.set_profile(VOCAB_KEY, &json!(terms), samples.len() as u64)?;
+            terms
+        };
+        let style = if style.is_empty() {
+            match history.get_profile(STYLE_KEY)? {
+                Some(Value::String(note)) => note,
+                _ => String::new(),
+            }
+        } else {
+            history.set_profile(STYLE_KEY, &json!(style), samples.len() as u64)?;
+            style
+        };
         Ok((terms, style))
     }
 }
@@ -309,6 +321,28 @@ mod tests {
     impl Fake {
         fn new(vocab: &str, style: &str) -> Arc<Fake> {
             Arc::new(Fake { vocab: vocab.into(), style: style.into(), calls: Mutex::new(Vec::new()) })
+        }
+    }
+
+    /// Answers one of the two prompts and fails the other.
+    struct HalfBroken {
+        broken: &'static str,
+        reply: String,
+    }
+
+    impl Backend for HalfBroken {
+        fn complete(&self, system: &str, _: &str, _: f32, _: bool) -> Result<String, BackendError> {
+            let is_style = system == STYLE_PROMPT;
+            if is_style == (self.broken == "style") {
+                return Err(BackendError("timed out".into()));
+            }
+            Ok(self.reply.clone())
+        }
+        fn available(&self) -> (bool, String) {
+            (true, "ok".into())
+        }
+        fn label(&self) -> String {
+            "HalfBroken".into()
         }
     }
 
@@ -491,6 +525,30 @@ mod tests {
             assert_eq!(*timeout, MINING_TIMEOUT_SECS);
             assert!(!thinking);
         }
+    }
+
+    #[test]
+    fn a_failed_half_keeps_what_was_learned_before() {
+        let (_dir, store) = open_store();
+        for _ in 0..3 {
+            record(&store, "raw", "Ptyxis and Tauri, Ptyxis and Tauri");
+        }
+        store.set_profile(VOCAB_KEY, &json!(["Ptyxis"]), 3).unwrap();
+        store.set_profile(STYLE_KEY, &json!("Old note."), 3).unwrap();
+
+        // Vocabulary mining fails, the style note succeeds.
+        let learner = Learner::new(Arc::new(HalfBroken { broken: "vocabulary", reply: "New note.".into() }));
+        let (terms, style) = learner.refresh(&store, 40).unwrap();
+        assert_eq!(terms, strings(&["Ptyxis"]));
+        assert_eq!(style, "New note.");
+        assert_eq!(load_profile(&store), (strings(&["Ptyxis"]), "New note.".into()));
+
+        // And the other way round.
+        let learner = Learner::new(Arc::new(HalfBroken { broken: "style", reply: "[\"Tauri\"]".into() }));
+        let (terms, style) = learner.refresh(&store, 40).unwrap();
+        assert_eq!(terms, strings(&["Tauri"]));
+        assert_eq!(style, "New note.");
+        assert_eq!(load_profile(&store), (strings(&["Tauri"]), "New note.".into()));
     }
 
     #[test]

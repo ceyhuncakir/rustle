@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::cleanup::Cleaner;
 use crate::config::Config;
@@ -119,9 +119,22 @@ pub trait Transcriber: Send + Sync {
 pub enum Event {
     Hotkey(HotkeyEvent),
     Level(f32),
-    Finished { raw: String, text: String },
-    Failed { message: String },
-    HideError { seq: u64 },
+    /// A worker's result. `take` says which take it belongs to, so a result
+    /// that arrives after that take was cancelled or superseded is dropped.
+    Finished {
+        take: u64,
+        raw: String,
+        text: String,
+    },
+    Failed {
+        take: u64,
+        message: String,
+    },
+    /// The microphone stream broke mid-take (unplugged, taken away).
+    MicError(String),
+    HideError {
+        seq: u64,
+    },
     Shutdown,
 }
 
@@ -152,6 +165,9 @@ pub struct Engine {
     hold: HoldOrTap,
 
     busy: bool,
+    /// Numbers the takes. Bumped when one starts and when one is cancelled,
+    /// so only the take on screen can paste.
+    take: u64,
     context: FocusContext,
     started_at: Instant,
     processing_at: Instant,
@@ -188,6 +204,7 @@ impl Engine {
             rx,
             hold,
             busy: false,
+            take: 0,
             context: FocusContext::default(),
             started_at: now,
             processing_at: now,
@@ -262,8 +279,17 @@ impl Engine {
             Event::Hotkey(HotkeyEvent::Released) => self.on_released(),
             Event::Hotkey(HotkeyEvent::Cancel) => self.on_cancel(),
             Event::Level(level) => self.on_level(level),
-            Event::Finished { raw, text } => self.finish(raw, text),
-            Event::Failed { message } => self.fail(&message),
+            Event::Finished { take, raw, text } => {
+                if self.is_current(take) {
+                    self.finish(raw, text);
+                }
+            }
+            Event::Failed { take, message } => {
+                if self.is_current(take) {
+                    self.fail(&message);
+                }
+            }
+            Event::MicError(message) => self.on_mic_error(&message),
             Event::HideError { seq } => {
                 if seq == self.error_seq && !self.busy && !self.recorder.recording() {
                     self.overlay.set_state(State::Hidden);
@@ -272,6 +298,17 @@ impl Engine {
             Event::Shutdown => return false,
         }
         true
+    }
+
+    /// Whether a worker's result still belongs to the take in progress. After
+    /// a cancel, or once a newer take has started, pasting it would put old
+    /// words into whatever the user has focused now.
+    fn is_current(&self, take: u64) -> bool {
+        let current = self.busy && take == self.take;
+        if !current {
+            debug!("dropping the result of take {take}, which was cancelled or superseded");
+        }
+        current
     }
 
     fn apply(&mut self, action: Action) {
@@ -295,9 +332,17 @@ impl Engine {
     // -- hotkey -----------------------------------------------------------
 
     fn on_pressed(&mut self, mode: &str) {
-        if self.busy || self.recorder.recording() {
+        if self.recorder.recording() {
             return;
         }
+        if self.busy {
+            // The press is dropped, so HoldOrTap must not go on believing it
+            // started something: a tap would stay latched, and the next tap
+            // would be spent stopping a recording that never began.
+            self.hold.reset();
+            return;
+        }
+        self.take += 1;
 
         // Capture context now: this is when the user's target app is focused.
         self.context = match self.focus.context() {
@@ -336,7 +381,7 @@ impl Engine {
         self.busy = true;
         self.processing_at = Instant::now();
         self.overlay.set_state(State::Thinking);
-        self.spawn_process(audio);
+        self.spawn_process(audio, self.take);
     }
 
     fn on_cancel(&mut self) {
@@ -344,13 +389,29 @@ impl Engine {
             self.recorder.stop();
         }
         self.hold.reset();
+        // Whatever the worker is still doing for this take is now unwanted.
+        self.take += 1;
         self.busy = false;
         self.overlay.set_state(State::Hidden);
     }
 
+    /// Only a take still recording is lost. Once released, the stream is
+    /// closed and the audio already in hand, so a late report from it is no
+    /// reason to throw that take away.
+    fn on_mic_error(&mut self, message: &str) {
+        if !self.recorder.recording() {
+            debug!("microphone error outside a take: {message}");
+            return;
+        }
+        self.recorder.stop();
+        self.hold.reset();
+        let message: String = message.chars().take(80).collect();
+        self.fail(&format!("Microphone: {message}"));
+    }
+
     // -- worker thread ---------------------------------------------------------
 
-    fn spawn_process(&self, audio: Vec<f32>) {
+    fn spawn_process(&self, audio: Vec<f32>, take: u64) {
         let tx = self.tx.clone();
         let transcriber = Arc::clone(&self.transcriber);
         let cleaner = Arc::clone(&self.cleaner);
@@ -363,16 +424,18 @@ impl Engine {
                     process(&*transcriber, &*cleaner, &context, &audio_cfg, audio)
                 }));
                 let event = match result {
-                    Ok(Ok(Outcome::Text { raw, text })) => Event::Finished { raw, text },
-                    Ok(Ok(Outcome::NoSpeech)) => Event::Failed { message: "No speech detected".into() },
+                    Ok(Ok(Outcome::Text { raw, text })) => Event::Finished { take, raw, text },
+                    Ok(Ok(Outcome::NoSpeech)) => Event::Failed { take, message: "No speech detected".into() },
                     Ok(Err(err)) => {
                         // A crash here must not kill the engine.
                         log::error!("dictation failed: {err:#}");
-                        let mut message = err.to_string();
-                        message.truncate(80);
-                        Event::Failed { message }
+                        // Cut by characters: a byte cut can land inside a
+                        // multi-byte one and panic, out here where nothing
+                        // catches it and the engine would wait forever.
+                        let message = err.to_string().chars().take(80).collect();
+                        Event::Failed { take, message }
                     }
-                    Err(_) => Event::Failed { message: "dictation crashed".into() },
+                    Err(_) => Event::Failed { take, message: "dictation crashed".into() },
                 };
                 let _ = tx.send(event);
             })
@@ -470,8 +533,11 @@ impl Engine {
     /// Record for a fixed time and insert. Used by `flow dictate` to test the
     /// whole path without a working hotkey. Runs synchronously.
     pub fn dictate_once(&mut self, seconds: f32) -> anyhow::Result<String> {
+        // Checked first: from_secs_f32 panics on a negative or non-finite value.
+        let length = Duration::try_from_secs_f32(seconds)
+            .map_err(|_| anyhow::anyhow!("cannot record for {seconds} seconds"))?;
         self.on_pressed("manual");
-        std::thread::sleep(Duration::from_secs_f32(seconds));
+        std::thread::sleep(length);
 
         let audio = self.recorder.stop();
         self.overlay.set_state(State::Thinking);
@@ -507,14 +573,17 @@ fn process(
         audio = dsp::trim_silence(&audio, audio_cfg.sample_rate, audio_cfg.silence_rms);
     }
 
+    // What was said goes to the debug log only: the default level ends up in
+    // the system journal, and dictation is often private.
     let raw = transcriber.transcribe(&audio, audio_cfg.sample_rate)?;
-    info!("raw: {raw:?}");
+    debug!("raw: {raw:?}");
     if raw.is_empty() {
         return Ok(Outcome::NoSpeech);
     }
 
     let text = cleaner.clean(&raw, context);
-    info!("clean: {text:?}");
+    debug!("clean: {text:?}");
+    info!("transcribed {} characters, {} after cleanup", raw.chars().count(), text.chars().count());
     Ok(Outcome::Text { raw, text })
 }
 
@@ -522,18 +591,22 @@ fn process(
 mod test_support {
     //! Fakes for every trait the engine drives.
     use super::*;
-    use std::sync::Mutex;
+    use std::collections::VecDeque;
+    use std::sync::{Condvar, Mutex};
 
     #[derive(Default)]
     pub struct FakeOverlay {
         pub states: Mutex<Vec<State>>,
+        pub texts: Mutex<Vec<String>>,
         pub levels: Mutex<Vec<f32>>,
     }
     impl Overlay for FakeOverlay {
         fn set_state(&self, state: State) {
             self.states.lock().unwrap().push(state);
         }
-        fn set_text(&self, _text: &str) {}
+        fn set_text(&self, text: &str) {
+            self.texts.lock().unwrap().push(text.to_string());
+        }
         fn push_level(&self, level: f32) {
             self.levels.lock().unwrap().push(level);
         }
@@ -587,14 +660,50 @@ mod test_support {
         }
     }
 
+    /// Holds workers inside `transcribe` until the test lets them through,
+    /// so a test can act while a take is still "thinking".
+    #[derive(Default)]
+    pub struct Gate {
+        permits: Mutex<u32>,
+        opened: Condvar,
+    }
+    impl Gate {
+        pub fn open(&self, permits: u32) {
+            *self.permits.lock().unwrap() += permits;
+            self.opened.notify_all();
+        }
+        fn pass(&self) {
+            // Bounded, so a broken test fails instead of hanging.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut permits = self.permits.lock().unwrap();
+            while *permits == 0 && Instant::now() < deadline {
+                permits = self.opened.wait_timeout(permits, Duration::from_millis(20)).unwrap().0;
+            }
+            *permits = permits.saturating_sub(1);
+        }
+    }
+
     pub struct FakeTranscriber {
         pub text: String,
-        pub fail: bool,
+        /// Said by successive calls, ahead of `text`.
+        pub script: Mutex<VecDeque<String>>,
+        /// Every call fails with this.
+        pub error: Option<String>,
+        pub gate: Option<Arc<Gate>>,
         pub calls: Mutex<Vec<usize>>,
     }
     impl FakeTranscriber {
         pub fn saying(text: &str) -> Self {
-            Self { text: text.into(), fail: false, calls: Mutex::new(vec![]) }
+            Self {
+                text: text.into(),
+                script: Mutex::default(),
+                error: None,
+                gate: None,
+                calls: Mutex::new(vec![]),
+            }
+        }
+        pub fn gated(text: &str, gate: &Arc<Gate>) -> Self {
+            Self { gate: Some(Arc::clone(gate)), ..Self::saying(text) }
         }
     }
     impl Transcriber for FakeTranscriber {
@@ -606,10 +715,14 @@ mod test_support {
         }
         fn transcribe(&self, audio: &[f32], _sample_rate: u32) -> anyhow::Result<String> {
             self.calls.lock().unwrap().push(audio.len());
-            if self.fail {
-                anyhow::bail!("boom");
+            let text = self.script.lock().unwrap().pop_front().unwrap_or_else(|| self.text.clone());
+            if let Some(gate) = &self.gate {
+                gate.pass();
             }
-            Ok(self.text.clone())
+            if let Some(error) = &self.error {
+                anyhow::bail!("{error}");
+            }
+            Ok(text)
         }
     }
 
@@ -682,6 +795,35 @@ mod tests {
                 engine.handle(event);
             }
         }
+    }
+
+    /// Pump events until a worker's result has been handled, whether or not
+    /// the engine acted on it.
+    fn next_result(engine: &mut Engine) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(event) = engine.rx.recv_timeout(Duration::from_millis(50)) {
+                let result = matches!(event, Event::Finished { .. } | Event::Failed { .. });
+                engine.handle(event);
+                if result {
+                    return;
+                }
+            }
+        }
+        panic!("the worker never reported back");
+    }
+
+    fn wait_for(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Longer than HoldOrTap's debounce, so the next raw press counts.
+    fn past_debounce() {
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     #[test]
@@ -759,7 +901,7 @@ mod tests {
     #[test]
     fn transcriber_failure_does_not_kill_the_engine() {
         let mut t = FakeTranscriber::saying("x");
-        t.fail = true;
+        t.error = Some("boom".into());
         let mut r = rig(2.0, t);
         r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
         r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
@@ -804,5 +946,129 @@ mod tests {
             r.engine.handle(Event::Level(0.5));
         }
         assert_eq!(r.overlay.levels.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_long_non_ascii_error_is_reported_not_fatal() {
+        // Byte 80 of this falls inside a two-byte character. Cutting there
+        // used to panic the worker and leave the engine busy for good.
+        let message = format!("x{}", "ü".repeat(60));
+        let mut t = FakeTranscriber::saying("x");
+        t.error = Some(message.clone());
+        let mut r = rig(2.0, t);
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        next_result(&mut r.engine);
+        assert!(!r.engine.busy);
+        assert_eq!(r.overlay.states.lock().unwrap().last(), Some(&State::Error));
+        let shown = r.overlay.texts.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(shown, message.chars().take(80).collect::<String>());
+    }
+
+    #[test]
+    fn cancel_while_thinking_does_not_paste() {
+        let gate = Arc::new(Gate::default());
+        let mut r = rig(2.0, FakeTranscriber::gated("hello", &gate));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Cancel));
+        gate.open(1);
+        next_result(&mut r.engine);
+        assert!(r.injector.0.lock().unwrap().is_empty());
+        assert_eq!(r.overlay.states.lock().unwrap().last(), Some(&State::Hidden));
+    }
+
+    #[test]
+    fn a_cancelled_take_cannot_paste_into_the_next_one() {
+        let gate = Arc::new(Gate::default());
+        let t = FakeTranscriber::gated("new words", &gate);
+        t.script.lock().unwrap().push_back("old words".into());
+        let mut r = rig(2.0, t);
+        let transcriber = r.transcriber.clone();
+
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        // The first worker has its words before the second take begins.
+        wait_for(|| transcriber.calls.lock().unwrap().len() == 1);
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Cancel));
+
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        wait_for(|| transcriber.calls.lock().unwrap().len() == 2);
+        // Both finish, in whichever order; only the live take may paste.
+        gate.open(2);
+        next_result(&mut r.engine);
+        next_result(&mut r.engine);
+
+        assert_eq!(*r.injector.0.lock().unwrap(), vec!["new words".to_string()]);
+        assert!(!r.engine.busy);
+    }
+
+    #[test]
+    fn a_tap_while_busy_does_not_leave_the_shortcut_latched() {
+        let gate = Arc::new(Gate::default());
+        let mut r = rig(2.0, FakeTranscriber::gated("hi", &gate));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        // A tap while the take is still being transcribed is dropped...
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Up));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 1);
+        gate.open(1);
+        next_result(&mut r.engine);
+        // ...so the next tap starts a take, rather than stopping one that
+        // never began.
+        past_debounce();
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 2);
+        assert!(r.engine.recorder.recording());
+    }
+
+    #[test]
+    fn a_microphone_error_mid_take_stops_and_says_so() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        r.engine.handle(Event::MicError("device unplugged".into()));
+        assert!(!r.engine.recorder.recording());
+        assert_eq!(r.stops.load(Ordering::SeqCst), 1);
+        assert!(!r.engine.busy);
+        assert_eq!(r.overlay.states.lock().unwrap().last(), Some(&State::Error));
+        let shown = r.overlay.texts.lock().unwrap().last().cloned();
+        assert_eq!(shown.as_deref(), Some("Microphone: device unplugged"));
+        assert!(r.transcriber.calls.lock().unwrap().is_empty());
+        // The shortcut is not left latched: the next press starts afresh.
+        past_debounce();
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_microphone_error_after_release_leaves_the_take_alone() {
+        let gate = Arc::new(Gate::default());
+        let mut r = rig(2.0, FakeTranscriber::gated("hello", &gate));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        // The stream is already closed and the take is in hand.
+        r.engine.handle(Event::MicError("late".into()));
+        assert!(r.engine.busy);
+        gate.open(1);
+        next_result(&mut r.engine);
+        assert_eq!(*r.injector.0.lock().unwrap(), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn a_microphone_error_while_idle_is_ignored() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        r.engine.handle(Event::MicError("stray".into()));
+        assert!(r.overlay.states.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dictate_once_refuses_a_nonsense_length() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        for seconds in [-1.0, f32::NAN, f32::INFINITY] {
+            assert!(r.engine.dictate_once(seconds).is_err(), "{seconds}");
+        }
+        assert_eq!(r.starts.load(Ordering::SeqCst), 0);
     }
 }
