@@ -1,0 +1,15 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}} {{exec_arg}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+StartupNotify=false
+Keywords=dictation;dictate;speech;voice;transcribe;stt;microphone;
+{{#if mime_type}}
+MimeType={{mime_type}}
+{{/if}}

@@ -24,6 +24,7 @@ const HOLD_THRESHOLD_MS = 350;
 const POLL_MS = 40;
 const DEBOUNCE_MS = 150;
 
+const EXTENSION_VERSION = '4';
 const BUS_NAME = 'ai.flow.Island';
 const OBJECT_PATH = '/ai/flow/Island';
 
@@ -50,6 +51,7 @@ const IFACE = `
     <method name="DevHideOverview"/>
     <method name="DevPressHotkey"/>
     <property name="State" type="s" access="read"/>
+    <property name="Version" type="s" access="read"/>
     <signal name="HotkeyPressed">
       <arg type="s" name="mode"/>
     </signal>
@@ -85,6 +87,16 @@ export default class FlowExtension extends Extension {
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._onHotkey());
 
+        // Cancel: stop recording and hide without pasting. Escape alone
+        // cannot be grabbed globally without breaking every app, so it is a
+        // modifier chord, <Super>Escape by default.
+        Main.wm.addKeybinding(
+            'cancel-dictation',
+            this._settings,
+            Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => this._onCancel());
+
         if (action === Meta.KeyBindingAction.NONE) {
             console.error('flow: could not register the dictation shortcut - ' +
                 'another application may already own it');
@@ -100,6 +112,7 @@ export default class FlowExtension extends Extension {
         this._disableDevMode();
         this._stopModifierWatch();
         Main.wm.removeKeybinding('toggle-dictation');
+        Main.wm.removeKeybinding('cancel-dictation');
         this._settings = null;
         this._recording = false;
 
@@ -191,6 +204,13 @@ export default class FlowExtension extends Extension {
         }
     }
 
+    _onCancel() {
+        this._stopModifierWatch();
+        this._recording = false;
+        this.emitCancelRequested();
+        this._island?.setState('hidden');
+    }
+
     _stopDictation() {
         this._stopModifierWatch();
         if (!this._recording)
@@ -255,6 +275,12 @@ export default class FlowExtension extends Extension {
     //
     // Every method is guarded: an exception raised on the bus would otherwise
     // propagate into the Shell's main loop and can take down the session.
+
+    // Lets the daemon detect a mismatch between its expectations and the
+    // extension actually loaded. Bump with metadata.json.
+    get Version() {
+        return EXTENSION_VERSION;
+    }
 
     get State() {
         return this._island?.state ?? 'hidden';

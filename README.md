@@ -1,400 +1,232 @@
 # Flow
 
-A local, offline dictation stack for Fedora + GNOME Wayland: hold a key, talk,
-and cleaned-up text appears in whatever app you are in — with a floating island
-showing what is happening.
+Local, offline dictation: hold a key, talk, and cleaned-up text appears in
+whatever app you are in, with a floating island showing what is happening.
 
-Status: **phases 1-3 done** — island, daemon, hotkey, recognition, cleanup and
-app packaging all work end to end. Phase 4 (settings GUI) is not started.
-
-## What works today
+Recognition runs on your machine (NVIDIA Parakeet TDT 0.6B v3, English and
+Dutch, detected automatically). A cleanup pass turns the raw transcript into
+text worth pasting: punctuation, filler removal, self-corrections resolved,
+per-app tone. That pass runs on a local model through Ollama, on a cloud
+provider of your choice, or not at all.
 
 | | |
 |---|---|
 | Floating island | Renders above every window, never takes focus or eats a click |
-| Six states | `idle`, `listening`, `thinking`, `inserting`, `error`, `hidden`, with morph animations |
-| Live waveform | Cairo-drawn bars driven by real microphone amplitude |
 | Push-to-talk | One shortcut gives both hold-to-talk and tap-to-toggle |
-| Recognition | Parakeet TDT 0.6B v3 — English + Dutch, detected automatically, ~0.05s |
-| Cleanup pass | Local Qwen3 via Ollama: punctuation, filler removal, self-corrections, per-app tone |
-| Focus context | Reads the focused app's WM class and title, and feeds it to the cleanup model |
-| Text injection | Pastes into any app — verified cross-process into GNOME Text Editor |
-| App entry | "Flow Dictation" in the Applications grid; on-demand, never autostarted |
+| Recognition | Parakeet TDT v3 on onnxruntime, on the CPU or any graphics card: ~40x realtime on a CPU, ~140x on an RTX 4090 |
+| Cleanup | Local Qwen3 via Ollama, or Anthropic / OpenAI / OpenRouter / DeepSeek / any OpenAI-compatible endpoint |
+| Focus context | The focused app's identity and title feed the cleanup model, so tone adapts per app |
 | Learning | Optional, off by default: picks up your jargon and register over time |
-| Settings | GTK4/libadwaita window: models, providers, keys, language, learning |
+| Settings | A preferences window, a first-run wizard, and a tray icon |
 | Diagnostics | `flow doctor` checks every moving part and says what is wrong |
+
+## Status
+
+The Rust + Tauri version replaces the earlier Python daemon. What is verified
+where:
+
+| Platform | State |
+|---|---|
+| Linux, GNOME Wayland | **Works.** The Shell extension draws the island and delivers the hotkey; the app talks to it over D-Bus. Daily-driver tested. |
+| Linux, X11 | Built, not yet verified on a real session. |
+| Linux, KDE / Hyprland / other Wayland | Built without a global hotkey yet; pasting needs `dotool` or `ydotool`. Planned for a later milestone. |
+| Windows | Built through CI, not yet verified on a machine. |
+| macOS | Built through CI, not yet verified on a machine; non-activating panel and permission prompts still to come. |
+
+Every crate's tests, the recognition parity suite and the 28-case cleanup
+evaluation pass on the Linux development machine.
 
 ## Install
 
+### Linux, GNOME (today)
+
 ```sh
-uv venv --python 3.13 --system-site-packages   # system PyGObject must be visible
-uv pip install -e '.[gpu]'                     # or '.[cpu]'
-scripts/install-app.sh                         # binary, icon, .desktop, user service
-scripts/install-ollama.sh                      # optional, no root; pulls the cleanup model
-scripts/install.sh                             # link the Shell extension, then LOG OUT
+git clone https://github.com/ceyhuncakir/flow && cd flow
+scripts/install-app.sh            # builds, installs ~/.local/bin/flow, the service, the extension
 ```
 
-Wayland cannot load a new Shell extension without a logout — there is no
-`Alt+F2` `r`. After logging back in, `flow doctor` should be green.
+Recognition runs on the graphics card when that is faster: AMD, Intel Arc
+and NVIDIA cards through WebGPU on Vulkan, which needs nothing beyond the
+graphics driver (on Fedora, `mesa-vulkan-drivers` for AMD and Intel). A card
+built into the processor is left alone, because the CPU is faster there (an
+Intel UHD 770 managed 6x realtime against the CPU's 36x); pick "GPU only" in
+the settings to use it anyway. Cards need 4 GB of memory. `flow gpu` shows
+what was found and what it will use.
 
-Then press **Super+D** and talk. Hold it and it stops when you let go; tap it
-and it stops on the next tap.
+On NVIDIA, `scripts/install-app.sh --cuda` builds for CUDA instead: about 20%
+faster on recognition, which is a few milliseconds per dictation, but it
+needs CUDA 12 and cuDNN 9 and covers the RTX 20 to 40 series only. Flow finds
+those libraries on the loader path, under `/usr/local/cuda` and in pip's
+`nvidia-*` wheels (`pip install --user nvidia-cudnn-cu12`). `--cpu` leaves
+the GPU out.
+
+Log out and back in once so GNOME loads the extension (Wayland cannot
+hot-load one). Then either:
+
+```sh
+systemctl --user start flow       # headless: the extension is the whole UI
+flow                              # or the tray app with the settings window and wizard
+```
+
+Press **Super+D** and talk. Hold it and it stops when you let go; tap it and
+it stops on the next tap. **Super+Escape** cancels.
+
+Cleanup is optional. For the local model, install Ollama and pull one:
+
+```sh
+scripts/install-ollama.sh         # rootless Ollama + qwen3:14b
+```
+
+or pick a cloud provider in the settings window. API keys go in the system
+keyring, never in the config file.
+
+### Windows and macOS
+
+Installers are produced by the release workflow. They are not yet verified on
+real machines; treat them as previews until the platform milestones below are
+done. They recognise speech on the GPU through WebGPU: Direct3D 12 on
+Windows, and on the Mac the Apple Silicon GPU through Metal. Intel Macs are
+not supported, because ONNX Runtime no longer ships for them.
 
 ## Why it is built this way
 
-GNOME 48 on Wayland rules out the obvious designs, so the split is forced:
+GNOME on Wayland rules out the obvious designs, so the split is forced:
 
 - **Mutter has no `wlr-layer-shell`.** No ordinary client can place an
-  always-on-top, click-through overlay. The island therefore has to live
-  *inside* the Shell as an extension. A Tauri or Electron window cannot do it.
-- **`wtype` does not work on GNOME.** It needs `zwp_virtual_keyboard_v1`, which
-  Mutter does not expose to clients.
-- **`ydotool` needs root.** It writes to `/dev/uinput`, which means a udev rule
-  and a privileged daemon.
-- **Only the Shell can see the focused window.** On Wayland a client cannot ask
-  what else is on screen — but that context is exactly what lets the cleanup
-  model adapt its tone per app.
-
-Running inside the Shell solves all four at once, using Mutter's own virtual
-input device, which needs no privileges at all.
+  always-on-top, click-through overlay. On GNOME the island therefore lives
+  *inside* the Shell as an extension. Elsewhere the app draws it in a window
+  of its own.
+- **`wtype` does not work on GNOME.** It needs `zwp_virtual_keyboard_v1`,
+  which Mutter does not expose. KDE does not either.
+- **`ydotool` needs root.** It writes to `/dev/uinput`.
+- **Only the Shell can see the focused window** on Wayland, and that context
+  is exactly what lets the cleanup model adapt its tone per app.
 
 ```
-┌─ GNOME Shell extension (GJS, in Mutter's process) ─────────┐
-│  island UI · focus context · text injection · hotkeys      │
-└──────────────────── ai.flow.Island (session bus) ──────────┘
-┌─ flowd (Python, systemd --user) ───────────────────────────┐
-│  audio capture · VAD · Parakeet STT · Ollama cleanup pass  │
-└────────────────────────────────────────────────────────────┘
-┌─ GTK4 + libadwaita settings GUI ───────────────────────────┐
-│  models · hotkeys · dictionary · history · per-app rules   │
-└────────────────────────────────────────────────────────────┘
+┌─ GNOME Shell extension (GJS, in Mutter's process) ────────────────┐
+│  island UI · focus context · text injection · hotkeys             │
+└──────────────────── ai.flow.Island (session bus) ─────────────────┘
+┌─ flow (Rust + Tauri) ─────────────────────────────────────────────┐
+│  engine · audio capture · Parakeet on onnxruntime · cleanup pass  │
+│  tray · settings window · first-run wizard                        │
+│  per-desktop backends: GNOME (D-Bus) · Windows · macOS · X11 ·    │
+│  Wayland (layer-shell + paste helpers)                            │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-The daemon stays an ordinary unprivileged user process. It owns audio and the
-models; it owns no pixels.
+The engine is one state machine driven by a channel, with every platform
+concern behind a trait, so the whole dictation path is tested with fakes.
 
 ## Layout
 
 ```
-extension/      GNOME Shell extension (the only privileged-ish part)
-  island.js       the pill: states, morph animations, positioning
-  visualizer.js   Cairo waveform / dots / check-mark, one 60fps draw loop
-  injector.js     clipboard + virtual-device paste, focus context
-  extension.js    D-Bus surface, lifecycle
-flowd/          the daemon (phase 2+)
-  island.py       D-Bus client for the island
-scripts/
-  install.sh         symlink the extension into place
-  nested-shell.sh    run it in an isolated Shell, headless or windowed
-  capture.py         screenshot every island state
-  test-injection.py  end-to-end proof that pasting works
-  demo.py            full fake dictation cycle
-  flowctl            one-shot CLI over the same D-Bus surface
+crates/flow-core/      engine, cleanup prompts and passes, providers, config, history, learning, secrets
+crates/flow-audio/     microphone capture (cpal + rubato)
+crates/flow-stt/       Parakeet TDT on onnxruntime (ort), model download, parity tests
+crates/flow-desktop/   overlay / hotkey / focus / paste per desktop; GNOME over D-Bus
+src-tauri/             the app: tray, windows, settings commands, CLI subcommands
+ui/                    overlay pill (canvas), settings and first-run (React)
+extension/             the GNOME Shell extension
+eval/cases.toml        the cleanup evaluation cases (`flow eval`)
+tests/fixtures/stt/    recognition parity goldens (WAVs regenerate from scripts/stt-golden.py)
+docs/qa-checklist.md   the per-platform manual checklist
+flowd/, tests/*.py     the previous Python implementation, kept until the GNOME path has been the daily driver for a while
 ```
 
-## Development loop
+## Command line
 
-Wayland cannot restart the Shell in place — there is no `Alt+F2` `r` — so a
-changed extension needs either a logout or a second Shell. `nested-shell.sh`
-runs the second Shell, on its own Wayland socket and its own D-Bus, so nothing
-can disturb the real session:
-
-```sh
-scripts/nested-shell.sh                          # visible window, poke at it
-FLOW_DEV=1 scripts/nested-shell.sh scripts/capture.py        # shoot all states
-FLOW_DEV=1 scripts/nested-shell.sh scripts/test-injection.py # prove injection
 ```
-
-`FLOW_DEV=1` turns on Mutter's unsafe mode so the screenshot API can be
-scripted. It is read from the environment by the extension itself, so it leaves
-no trace in dconf — which a nested Shell shares with the real session.
-
-To use it for real:
-
-```sh
-scripts/install.sh      # then log out and back in; Wayland cannot hot-reload
-flowctl show
-flowctl state listening
-flowctl insert "hello"
+flow                     the tray app (first launch opens the setup wizard)
+flow --headless          engine only, for the GNOME user service
+flow doctor              check every moving part
+flow dictate -s 5        record five seconds, recognise, clean, paste
+flow context             what the desktop reports as the focused app
+flow devices             microphones
+flow gpu                 graphics cards, and whether recognition can use one
+flow config [--edit]     the config file
+flow models status|download|import-hf
+flow eval                run the cleanup cases against the configured model
+flow learning on|off|status · flow vocab [--forget X] · flow learn · flow history [--clear]
 ```
-
-## D-Bus contract
-
-`ai.flow.Island` at `/ai/flow/Island` — the whole surface between the two
-halves. `flowctl` and `flowd` are peers, not layers.
-
-| Member | Purpose |
-|---|---|
-| `SetState(s)` | `idle` · `listening` · `thinking` · `inserting` · `error` · `hidden` |
-| `SetText(s)` | live partial or final transcript in the pill |
-| `PushLevel(d)` | one amplitude sample, 0..1, at frame rate |
-| `InsertText(s)` | paste into the focused window |
-| `GetFocusContext()` | `{app, title, role}` of the focused window |
-| `State` | current state, readable property |
-| `HotkeyPressed(s)` / `HotkeyReleased()` / `CancelRequested()` | signals, phase 2 |
-
-## Roadmap
-
-**Phase 4 — the GUI.** GTK4 + libadwaita: model picker, hotkey binding,
-dictionary editor, history with search, per-app rules, and an edit-learning
-loop that feeds your corrections back into the prompt. Also still open: a
-Claude API cleanup backend behind a config flag, and dictation history in
-SQLite.
-
-## Settings window
-
-`flow gui`, or the "Flow Dictation" icon in the Applications grid. GTK4 and
-libadwaita, so it matches the rest of the desktop.
-
-It covers the whole stack: start/stop with the live hotkey shown, the speech
-model (with a note when picking one means a download), CPU/GPU, microphone,
-the cleanup provider and model, editing style, output language, and the
-learning toggle with what it has picked up.
-
-Every control writes straight to `config.toml`, keeping its comments intact -
-the file stays the source of truth and is still the nicer way to set per-app
-rules and the dictionary. Changes that need a restart raise a banner with a
-button rather than applying silently.
-
-## Cleanup providers
-
-The model that cleans up your transcript is a dropdown:
-
-| Provider | Notes |
-|---|---|
-| **Ollama** (default) | Local, offline, free. Nothing leaves the machine. |
-| **Anthropic** | Claude, via the official SDK. |
-| **OpenAI** | GPT. |
-| **OpenRouter** | One key, hundreds of models — DeepSeek, Qwen, Llama, Gemini, Mistral. |
-| **DeepSeek** | DeepSeek directly, if you would rather not go through a router. |
-| **Other** | Any OpenAI-compatible endpoint: Groq, Together, Fireworks, vLLM, llama.cpp, LM Studio. Supply the address. |
-| **None** | Paste the raw transcript, no cleanup. |
-
-Everything except Ollama and Anthropic speaks the OpenAI protocol, so they
-share one implementation and differ only by base URL and which key opens them —
-adding a provider is a row in a table, not a new class. Error messages name the
-provider you are actually on, because "OpenAI rejected the key" while you are
-on OpenRouter sends you to the wrong dashboard.
-
-### Model lists
-
-Fetched from the provider, never hardcoded. A list baked into the source goes
-stale within weeks: the IDs written here by hand were already wrong when
-checked against the live catalogue.
-
-- **OpenRouter** publishes its catalogue without authentication, so the
-  dropdown fills with all ~370 usable models *before* you paste a key.
-- **Anthropic** and **OpenAI** are listed through their SDKs once a key is set.
-  The Anthropic page object auto-paginates; it is asked for a large page purely
-  to save round trips.
-
-The raw catalogue is not the same as the list of models that can clean up a
-transcript, so it is filtered:
-
-- `:batch` variants are dropped everywhere — they only serve a batch endpoint
-  and reject a synchronous request.
-- For OpenAI, embeddings, speech, image, moderation and realtime models are
-  dropped by name. Excluding known families beats allow-listing, since new chat
-  models appear constantly and an allow-list would hide them. The filter is
-  scoped to OpenAI, so a router that happens to route `openai/gpt-4o-audio`
-  keeps it.
-
-The list is sorted, which groups a router's models by vendor, and the dropdown
-is searchable.
-
-Cleanup is a short rewrite that the whole dictation waits on, so the hosted
-backends are configured for latency rather than depth - low effort, no
-streaming, small output cap.
-
-**API keys go in the GNOME keyring, never in `config.toml`.** That file ends up
-in backups and dotfile repos. An environment variable (`ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`) still wins when set, and the window says which source is in
-use so it is never ambiguous which of two keys is live.
-
-Whatever the provider, a failure falls back to pasting the raw transcript -
-switching to a cloud model must not mean losing a dictation when the network
-drops.
-
-## Languages
-
-English and Dutch. The recogniser (Parakeet TDT v3) detects which you are
-speaking on its own, so there is nothing to switch when you change language
-mid-session, and it costs nothing in speed over the English-only v2.
-
-`[cleanup] output_language` decides what comes out:
-
-| value | behaviour |
-|---|---|
-| `same` | whatever you spoke, cleaned up in that language (default) |
-| `en` | always English, translating your Dutch |
-| `nl` | always Dutch, translating your English |
-
-Translating is a third pass, for the same reason intent resolution is a second
-one: asked to clean up *and* translate in one call, the model does whichever
-the prompt mentions last. A disfluent English sentence requested in Dutch came
-back cleaned but still English, every time. Split apart, both work.
-
-Two things that had to be stated explicitly, because the system prompt is
-itself English and quietly pulls output towards English:
-
-- **Never translate in `same` mode.** Before this rule, Dutch came back as
-  English about half the time.
-- **English loanwords do not make a sentence English.** "Kun je kijken naar de
-  authenticatie middleware voordat we deployen?" is Dutch, and was the sentence
-  that kept getting translated.
-
-Retraction cues are detected in both languages — "nee wacht", "vergeet de...",
-"laat maar", "ik bedoelde". `"vergeet niet"` is excluded, since it means the
-opposite.
-
-## What the cleanup pass does
-
-Parakeet turns audio into words, then a local LLM decides what you meant by
-them. The LLM stage is itself two passes, but the first only runs when the
-transcript contains a retraction cue, so ordinary dictation costs one call:
-
-1. **Resolve** (conditional) — delete ideas you abandoned, and nothing else.
-2. **Polish** (always) — everything below.
-
-They are separate calls because the model cannot do both at once: with grammar
-repair first it treats a later retraction as content to keep; with retraction
-first it stops repairing grammar. Measured both orderings — each fixed one case
-and broke the other.
-
-The polish pass:
-
-- fixes punctuation, capitalisation and paragraph breaks
-- removes disfluencies, stutters and false starts, including a word abandoned
-  part-way and restarted
-- removes filler uses of "like", "you know", "sort of", "basically" — while
-  keeping them where they mean something ("something like this", "I like it")
-- **repairs the fragments disfluency removal leaves behind**, so every sentence
-  is grammatical, and splits run-on speech into separate sentences
-- **rephrases tangled sentences** — words tripping over each other, a clause
-  that never lands — into what you were reaching for, in your own vocabulary.
-  A sentence that already reads well is left exactly as spoken
-- assembles spoken URLs, emails and paths: "W W dot youtube dot com" becomes
-  `www.youtube.com`, "ceyhun at gmail dot com" becomes `ceyhun@gmail.com`
-- **resolves a change of mind**: when you abandon an idea mid-dictation
-  ("actually no, forget that, what I need is..."), the output reads as if you
-  had only ever said the final version
-- keeps a second, different request when you are adding rather than replacing
-- keeps discourse words (yeah, okay, so) that carry tone, and keeps slang and
-  swearing — fixing grammar must not turn casual speech into business writing
-- never answers, acts on, or executes what you dictated
-
-`scripts/eval-cleanup.py` pins all of that down against the live model - 24
-cases - eight taken verbatim from real dictations where the failures actually
-showed up, and four in Dutch. They cover each behaviour and, importantly, the ways it can
-go wrong:
-eating a second request that merely sounded like a correction, deleting a
-discourse word, or answering a dictated question.
-
-**The guard.** Asking the model to repair grammar necessarily lets it reword,
-and the failure mode of that licence is answering your dictation instead of
-transcribing it. Cleanup only ever condenses — fillers go, retractions go,
-spoken URLs collapse — so growth is the tell. An output more than 1.5x longer
-than the input, or containing a code block, is rejected and the raw transcript
-pastes instead.
-
-**Detecting retractions cheaply.** The second pass is gated on a regex, and
-that regex was tuned against 44 real dictations. "actually" alone fired 11
-times and was a genuine retraction once, so it now only counts next to a
-negation ("actually no", "actually wait"). After tightening: 2 fires, both
-genuine, no false positives.
-
-**On reasoning.** Qwen3 can think before answering, and it is off by default.
-Measured on the corpus it scored identically - 11/11 either way - while taking
-3-21s instead of 0.1-0.3s, and on the longest case it reasoned its way to a
-worse answer. Stating the rules precisely beat letting the model deliberate.
-`[cleanup] think = "auto"` reasons only on long transcripts with a retraction
-cue, `"always"` on everything.
-
-## Learning your vocabulary (off by default)
-
-Switched on, Flow stores your dictations locally and periodically mines two
-things from them with the same local model:
-
-- **vocabulary** — the project names, tools and jargon a general recogniser
-  mangles, so the cleanup pass spells them the way you do
-- **style** — one instruction describing how you actually write, fed back in so
-  editing does not sand your voice off
-
-Both are fed into the cleanup prompt, so the longer you use it the more it
-sounds like you.
-
-```sh
-flow learning on          # start learning, and start using what it learns
-flow learning off         # stop both; the profile is kept for next time
-flow learning status      # what it knows
-flow vocab                # see the terms and the style note
-flow vocab --forget "X"   # drop a term and never learn it again
-flow learn                # re-mine now instead of waiting
-flow history              # what is stored
-flow history --clear      # delete all of it
-```
-
-**While it is off, Flow stores nothing you dictate** — the transcript exists
-only long enough to be pasted. Everything is a local SQLite file under
-`~/.local/share/flow`; nothing leaves the machine.
-
-Mining runs in the background, never between your key release and the paste,
-and its failures are swallowed — learning must never break dictation.
-
-**Two guards, because a learned term is handed to another model as correct
-spelling.** A fabricated one becomes a word Flow will insert into text you
-never said:
-
-- Every mined term is **checked against your actual history** and dropped
-  unless it appears at least twice. This is not optional politeness: the first
-  version of the prompt included example terms, and the model returned five of
-  them back as "learned" — none of which this user had ever said.
-- Mining cannot tell jargon from a mis-transcription you later corrected. It
-  learned "Cafe" from a sentence whose next dictation was "I meant KVK, not
-  cafe". So `flow vocab --forget` blocks a term permanently, and the last word
-  is yours.
 
 ## Configuration
 
-`~/.config/flow/config.toml`, created by `flow config`. The parts worth knowing:
+`config.toml` in `~/.config/flow` (Linux), `~/Library/Application Support/flow`
+(macOS) or `%APPDATA%\flow` (Windows). The settings window edits it in place
+and keeps the comments; the file is still the nicer way to set per-app rules
+and the dictionary. The parts worth knowing:
 
-- `[cleanup] dictionary` — names and jargon the recogniser mangles. They are
-  given to the cleanup model, which fixes the spelling in context.
-- `[cleanup.app_rules]` — per-application tone, keyed by WM class. Run
-  `flow context` with the target app focused to find its key. For example
-  `"org.gnome.Console" = "Output a shell command only, no prose."`
-- `[cleanup] style` — `light` (punctuation only), `balanced`, or `tidy`
-  (also tightens grammar).
-- `[cleanup] resolve_intent` — the change-of-mind rule. The only rule that
-  deletes content; set `false` to keep everything you said.
-- `[stt] provider` — `auto` prefers CUDA and falls back to CPU.
-- `[cleanup] enabled = false` pastes the raw transcript, skipping the model.
+- `[cleanup] dictionary` - names and jargon the recogniser mangles.
+- `[cleanup.app_rules]` - per-application tone, keyed by the app identifier
+  `flow context` prints (a WM class on GNOME, an app name elsewhere).
+- `[cleanup] style` - `light`, `balanced` or `tidy`.
+- `[cleanup] resolve_intent` - the change-of-mind rule, the only one that
+  deletes content.
+- `[cleanup] output_language` - `same`, `en` or `nl`.
+- `[stt] provider` - `auto` uses the graphics card when `flow gpu` says it
+  is faster than the CPU; `gpu` insists (`cuda`, its old name, still works);
+  `cpu` never tries. For a CUDA build, CUDA libraries somewhere unusual can
+  be named in `FLOW_CUDA_LIBS` (a path list).
+- `[desktop] overlay` - `auto`, `window` or `off` (ignored on GNOME).
+- `[desktop] hotkey` - the shortcut, except on GNOME where it lives in the
+  extension's settings.
 
-## Pinned dependencies, and why
+## What the cleanup pass does
 
-`onnxruntime` is pinned below 1.23. Newer wheels are built against CUDA 13
-while this machine has 12.9, and 1.23 added an external-data path check that
-rejects HuggingFace's cache layout, where `model.onnx` and `model.onnx.data`
-are separate blobs in different directories. Either alone breaks model loading.
+Parakeet turns audio into words, then the cleanup model decides what you
+meant by them. Ordinary dictation costs one model call; a second, conditional
+pass runs only when the transcript contains a retraction cue ("no wait",
+"scratch that", "nee wacht"), and a third only when translating.
 
-cuDNN and cuBLAS come from the `nvidia-*` pip wheels, which install into
-`site-packages/nvidia/*/lib` — a directory on no loader search path. PyTorch
-dlopens them at import; onnxruntime does not, and silently falls back to CPU.
-`flowd/stt.py` preloads them with `RTLD_GLOBAL` before creating the session.
+The polish pass fixes punctuation and capitalisation, removes disfluencies
+and filler uses of "like" and "you know" while keeping them where they mean
+something, repairs the fragments that leaves behind, assembles spoken URLs
+and emails, resolves a change of mind so the output reads as if you had only
+ever said the final version, keeps discourse words and slang, and never
+answers or acts on what you dictated. An output more than 1.5x longer than
+the input, or containing a code block, is rejected and the raw transcript is
+pasted instead.
+
+`flow eval` pins all of that against the live model with 28 cases, eight of
+them verbatim from real dictations where the failure showed up and four in
+Dutch. Reasoning is off by default: on that corpus it scored the same while
+taking 3-21 s instead of 0.1-0.8 s.
+
+## Learning your vocabulary (off by default)
+
+Switched on, Flow stores your dictations locally in SQLite and periodically
+mines two things from them with the cleanup model: the names a general
+recogniser gets wrong, and one sentence describing how you write. Both feed
+back into the prompt. Every mined term must appear at least twice in your
+own history before it is kept, and `flow vocab --forget` blocks a term for
+good. While learning is off, nothing you dictate is stored.
+
+## Development
+
+```sh
+pnpm install
+cargo test --workspace                     # 200+ tests, no models needed
+pnpm tauri dev -- --features webgpu        # the app, with GPU recognition (or cuda)
+cargo run -p flow-desktop --example island # drive the live GNOME island over D-Bus
+scripts/nested-shell.sh                    # a throwaway GNOME Shell for extension work
+.venv/bin/python scripts/stt-golden.py     # regenerate recognition fixtures and goldens
+```
+
+CI runs format, clippy and tests on Linux, Windows and macOS, and the release
+workflow builds installers for all three with `tauri-action`.
+
+## Third-party components
+
+See [THIRD_PARTY.md](THIRD_PARTY.md). Flow itself is MIT licensed.
 
 ## Known limits
 
-- Only `text/plain` is preserved across the paste. An image or rich-text
-  clipboard selection is lost. Wispr Flow behaves the same way.
-- Dictating with the Overview open pastes into the Overview search entry — it
-  holds a keyboard grab even though the focused window is still your app.
+- Only `text/plain` is preserved across the paste; an image on the clipboard
+  is lost.
+- On GNOME, dictating with the Overview open pastes into the Overview search
+  entry.
 - GNOME extensions break across major GNOME releases; expect a fix-up at 50.
-- English and Dutch only, by choice. Parakeet v3 actually covers 25 European
-  languages, so a sentence in a third language will be transcribed rather than
-  rejected — the cleanup model is simply told to expect English or Dutch.
-- Dutch accuracy is **unverified on real speech**. It was developed against
-  espeak-ng synthetic Dutch, which mispronounces badly (it renders "werkt" as
-  "merkt"), so the transcription errors seen in testing are probably the test
-  audio, not the model.
-- The cleanup model adds latency proportional to output length. Recognition is
-  effectively free at 334x realtime; the model is the slow part.
+- English and Dutch by choice; Parakeet v3 covers 25 European languages and
+  a third one is transcribed rather than rejected.
+- The cleanup model adds latency proportional to output length. Recognition
+  is effectively free; the model is the slow part.

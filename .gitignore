@@ -5,3 +5,15 @@ __pycache__/
 
 # Build artifact - scripts/install.sh regenerates it
 extension/schemas/gschemas.compiled
+
+# Web frontend
+node_modules/
+dist/
+
+# Rust / Tauri
+/target
+/src-tauri/gen/schemas
+/src-tauri/target
+
+# Model files and parity fixtures that are generated locally
+/tests/fixtures/stt/*.wav

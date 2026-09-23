@@ -18,5 +18,10 @@
         When off, the shortcut always toggles and holding it does nothing.
       </description>
     </key>
+    <key name="cancel-dictation" type="as">
+      <default><![CDATA[['<Super>Escape']]]></default>
+      <summary>Cancel the current dictation</summary>
+      <description>Stops recording and hides the island without pasting anything.</description>
+    </key>
   </schema>
 </schemalist>

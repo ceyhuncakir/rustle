@@ -4,7 +4,7 @@ Name=Flow Dictation
 GenericName=Voice Typing
 Comment=Local voice dictation - settings, models and status
 Icon=flow-dictation
-Exec=flow gui
+Exec=flow
 Terminal=false
 StartupNotify=false
 Categories=Utility;Accessibility;
@@ -13,8 +13,8 @@ Actions=Start;Stop;
 
 [Desktop Action Start]
 Name=Start Dictation
-Exec=flow start
+Exec=systemctl --user start flow
 
 [Desktop Action Stop]
 Name=Stop Dictation
-Exec=flow stop
+Exec=systemctl --user stop flow

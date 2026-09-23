@@ -1,0 +1,183 @@
+/* Shared look for the settings window and the first-run wizard: a quiet,
+ * native-feeling surface in the pill's own palette. Light and dark follow the
+ * system; nothing is themed by hand. */
+
+@import "tailwindcss";
+
+:root {
+  color-scheme: light dark;
+  --bg: #f3f4f7;
+  --surface: #ffffff;
+  --surface-2: #e9ebf0;
+  --surface-3: #dfe2e9;
+  --line: rgba(17, 19, 27, 0.1);
+  --line-strong: rgba(17, 19, 27, 0.18);
+  --fg: #1a1d27;
+  --fg-2: #626a7a;
+  --fg-3: #8a91a0;
+  --accent: #3b6fe0;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(59, 111, 224, 0.12);
+  --success: #23945a;
+  --success-soft: rgba(35, 148, 90, 0.12);
+  --danger: #d23f49;
+  --danger-soft: rgba(210, 63, 73, 0.1);
+  --focus: rgba(59, 111, 224, 0.45);
+  --shadow: 0 1px 2px rgba(17, 19, 27, 0.05), 0 0 0 1px var(--line);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171922;
+    --surface: #1f222c;
+    --surface-2: #282c38;
+    --surface-3: #323744;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --fg: #eceff4;
+    --fg-2: #9ea6b8;
+    --fg-3: #737b8c;
+    --accent: #7aa3f7;
+    --accent-fg: #0f1420;
+    --accent-soft: rgba(122, 163, 247, 0.16);
+    --success: #6bd999;
+    --success-soft: rgba(107, 217, 153, 0.14);
+    --danger: #f5737a;
+    --danger-soft: rgba(245, 115, 122, 0.14);
+    --focus: rgba(122, 163, 247, 0.5);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--line);
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --font-sans: system-ui, -apple-system, "Segoe UI", Cantarell, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Source Code Pro", Menlo, monospace;
+  --radius-card: 12px;
+  --radius-control: 7px;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  input,
+  textarea,
+  .selectable {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .card {
+    background: var(--surface);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow);
+  }
+  .control {
+    background: var(--surface-2);
+    border-radius: var(--radius-control);
+    box-shadow: inset 0 0 0 1px var(--line);
+    min-height: 32px;
+    padding: 0 10px;
+    transition: box-shadow 120ms ease, background 120ms ease;
+  }
+  .control:hover {
+    background: var(--surface-3);
+  }
+  .control:focus-within,
+  .control:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
+    outline: none;
+  }
+  .control:disabled,
+  .control[aria-disabled="true"] {
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .select {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23888f9e' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M3 4.5l3 3 3-3'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+  }
+  .keycap {
+    display: inline-flex;
+    align-items: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 5px;
+    background: var(--surface);
+    box-shadow: inset 0 0 0 1px var(--line-strong), 0 1px 0 var(--line-strong);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1;
+    justify-content: center;
+  }
+  .toast-enter {
+    animation: toast-in 180ms ease-out;
+  }
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}

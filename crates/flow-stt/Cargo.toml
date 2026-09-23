@@ -1,0 +1,40 @@
+[package]
+name = "flow-stt"
+description = "Flow dictation: Parakeet TDT recognition on onnxruntime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Registers ONNX Runtime's CUDA execution provider for the encoder. The
+# prebuilt binaries ort downloads for rc.12 target CUDA 12 / cuDNN 9, which
+# must be on the loader path at run time (see `Parakeet` docs).
+cuda = ["ort/cuda"]
+# ONNX Runtime's WebGPU provider: AMD, Intel, NVIDIA and Apple GPUs through
+# Vulkan, Direct3D 12 or Metal. ort ships it as a separate prebuilt runtime,
+# so it cannot be combined with `cuda` in one build.
+webgpu = ["ort/webgpu"]
+
+[dependencies]
+flow-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+# rc.13 is CUDA-13-only; this pin matches the CUDA 12.9 toolkit.
+ort = "=2.0.0-rc.12"
+reqwest.workspace = true
+sha2.workspace = true
+rand.workspace = true
+dirs.workspace = true
+serde.workspace = true
+flate2 = "1"
+# Loads NVML and the CUDA libraries at run time; see `gpu`.
+libloading = "0.8"
+
+[dev-dependencies]
+env_logger.workspace = true
+hound.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+httpmock.workspace = true

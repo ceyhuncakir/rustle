@@ -1,66 +1,84 @@
 #!/usr/bin/env bash
-# Install Flow as a launchable app: a `flow` binary on PATH, an entry in the
-# Applications grid, and a user service so it can be switched on and off.
+# Install Flow for this user: the program in ~/.local/lib/flow, a `flow`
+# command in ~/.local/bin, the desktop entry, the icon and the user service.
+# Nothing needs root and nothing starts at login.
 #
-# Nothing here needs root and nothing is enabled at login - Flow starts when
-# you launch it.
+# Usage: scripts/install-app.sh [--cuda | --cpu]
+#   The default build recognises speech on any graphics card through WebGPU
+#   (Vulkan), and on the CPU where no card is worth it; it needs nothing
+#   beyond the graphics driver. --cuda builds for NVIDIA's CUDA instead,
+#   about 20% faster on an NVIDIA card but needing CUDA 12 and cuDNN 9;
+#   --cpu leaves the GPU out. `flow gpu` shows what the result will use.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN_DIR="$HOME/.local/bin"
-APP_DIR="$HOME/.local/share/applications"
-ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
-UNIT_DIR="$HOME/.config/systemd/user"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP_DIR="$HOME/.local/lib/flow"
+BIN="$HOME/.local/bin/flow"
 
-if [ ! -x "$ROOT/.venv/bin/flow" ]; then
-    echo "error: $ROOT/.venv/bin/flow missing - run 'uv sync' first, or:" >&2
-    echo "       uv venv --python 3.13 --system-site-packages" >&2
-    echo "       uv pip install -e '.[gpu]'" >&2
-    exit 1
-fi
+case "${1:-}" in
+    "") backend=webgpu ;;
+    --cuda) backend=cuda ;;
+    --cpu) backend=cpu ;;
+    *) echo "usage: $0 [--cuda | --cpu]" >&2; exit 2 ;;
+esac
+FEATURES=()
+[[ $backend != cpu ]] && FEATURES=(--features "$backend")
+echo "building for: $backend"
 
-mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR" "$UNIT_DIR"
+# `tauri build`, not `cargo build`: only the former embeds the web UI. A
+# plain cargo build leaves the windows pointing at the dev server.
+echo "building (a release build takes a few minutes)..."
+(cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null && pnpm tauri build --no-bundle "${FEATURES[@]}")
+OUT="$ROOT/target/release"
+[[ -x "$OUT/flow" ]] || { echo "build did not produce $OUT/flow" >&2; exit 1; }
 
-# A symlink, not a copy: the venv's console script already points at the venv
-# interpreter, so it works from anywhere, and edits to the source take effect
-# immediately because the package is installed editable.
-ln -sfn "$ROOT/.venv/bin/flow" "$BIN_DIR/flow"
-echo "binary   $BIN_DIR/flow"
+# The libraries the GPU backend needs sit next to the real program: Dawn
+# for WebGPU (found through the program's rpath), ONNX Runtime's provider
+# for CUDA (loaded from beside the program as it was started, links not
+# followed). Hence ~/.local/bin/flow is a wrapper that starts it by path.
+install -Dm755 "$OUT/flow" "$APP_DIR/flow"
+rm -f "$APP_DIR"/libonnxruntime_providers_*.so "$APP_DIR"/libwebgpu_dawn.so
+case $backend in
+    webgpu) libs=(libwebgpu_dawn.so) ;;
+    cuda) libs=(libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so) ;;
+    *) libs=() ;;
+esac
+for lib in "${libs[@]}"; do
+    install -m644 "$OUT/$lib" "$APP_DIR/$lib"
+done
+mkdir -p "$(dirname "$BIN")"
+# Remove first: an older install left a symlink here, and writing through
+# it would overwrite whatever it points at.
+rm -f "$BIN"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$APP_DIR/flow" >"$BIN"
+chmod 755 "$BIN"
 
-install -m 644 "$ROOT/packaging/flow-dictation.svg" "$ICON_DIR/flow-dictation.svg"
-echo "icon     $ICON_DIR/flow-dictation.svg"
+install -Dm644 "$ROOT/packaging/flow-dictation.svg" \
+    "$HOME/.local/share/icons/hicolor/scalable/apps/flow-dictation.svg"
+# An absolute Exec: the desktop session's PATH often lacks ~/.local/bin.
+mkdir -p "$HOME/.local/share/applications"
+sed "s|^Exec=flow\$|Exec=\"$BIN\"|" "$ROOT/packaging/flow-dictation.desktop" \
+    >"$HOME/.local/share/applications/flow-dictation.desktop"
+install -Dm644 "$ROOT/packaging/flow.service" "$HOME/.config/systemd/user/flow.service"
 
-install -m 644 "$ROOT/packaging/flow-dictation.desktop" "$APP_DIR/flow-dictation.desktop"
-echo "desktop  $APP_DIR/flow-dictation.desktop"
-
-install -m 644 "$ROOT/packaging/flow.service" "$UNIT_DIR/flow.service"
-echo "service  $UNIT_DIR/flow.service"
-
-# The .desktop calls `flow` unqualified, so the grid launch only works if
-# ~/.local/bin is on PATH for graphical launches too.
-if ! systemctl --user show-environment 2>/dev/null | grep -q "^PATH=.*$BIN_DIR"; then
-    systemctl --user import-environment PATH 2>/dev/null || true
+# The unit runs `flow --headless`, which needs the GNOME Shell extension.
+if [[ ${XDG_CURRENT_DESKTOP:-} == *GNOME* ]]; then
+    "$ROOT/scripts/install.sh"
 fi
 
 systemctl --user daemon-reload
-update-desktop-database "$APP_DIR" 2>/dev/null || true
-gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
+echo
+echo "installed $APP_DIR/flow"
+"$BIN" gpu 2>/dev/null || true
 case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo; echo "note: $BIN_DIR is not on your PATH; add it to ~/.zshrc:";
-       echo "      export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "note: ~/.local/bin is not on your PATH; the app launcher works regardless" ;;
 esac
-
-cat <<'DONE'
-
-Installed. "Flow Dictation" is now in your Applications grid - launching it
-starts the daemon, and right-clicking the icon offers Stop.
-
-From a terminal:
-  flow doctor     check every moving part
-  flow start      start in the background
-  flow stop       stop
-  flow logs       follow the daemon log
-  flow dictate    record 5s and insert, without needing the hotkey
-DONE
+echo
+echo "next:"
+echo "  flow doctor                       # every part should be ok"
+echo "  systemctl --user start flow       # headless, driven by the Shell extension"
+echo "  flow                              # or the tray app with the settings window"

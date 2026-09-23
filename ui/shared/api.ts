@@ -1,0 +1,292 @@
+// The command and event contract between the pages and the Rust side.
+//
+// Every command goes through `invoke` in bridge.ts; every type here mirrors
+// the JSON the Tauri commands return. Keep this file in sync with
+// src-tauri: it is the one place the two halves agree on names.
+
+import { invoke, listen, type Unlisten } from "./bridge";
+
+// -- config (crates/flow-core/src/config.rs) ---------------------------------
+
+export interface AudioConfig {
+  /** Input device name substring; empty means the system default. */
+  device: string;
+  sample_rate: number;
+  silence_rms: number;
+  trim_silence: boolean;
+  min_seconds: number;
+}
+
+export interface SttConfig {
+  model: string;
+  /** auto | gpu | cpu ("cuda" is the old name for gpu) */
+  provider: string;
+}
+
+export interface CleanupConfig {
+  enabled: boolean;
+  /** ollama | anthropic | openai | openrouter | deepseek | custom | none */
+  backend: string;
+  model: string;
+  endpoint: string;
+  base_url: string;
+  timeout: number;
+  keep_alive: string;
+  /** light | balanced | tidy */
+  style: string;
+  resolve_intent: boolean;
+  /** auto | never | always */
+  think: string;
+  languages: string[];
+  /** same | en | nl */
+  output_language: string;
+  dictionary: string[];
+  app_rules: Record<string, string>;
+}
+
+export interface LearningConfig {
+  enabled: boolean;
+  min_dictations: number;
+  refresh_every: number;
+  max_terms: number;
+}
+
+export interface DesktopConfig {
+  /** auto | window | off */
+  overlay: string;
+  hotkey: string;
+  push_to_talk: boolean;
+}
+
+export interface Config {
+  audio: AudioConfig;
+  stt: SttConfig;
+  cleanup: CleanupConfig;
+  learning: LearningConfig;
+  desktop: DesktopConfig;
+}
+
+export type ConfigSection = keyof Config;
+export type ConfigValue = boolean | number | string | string[];
+
+// -- command payloads --------------------------------------------------------
+
+export interface Status {
+  running: boolean;
+  state: string;
+  hotkey: string;
+  version: string;
+}
+
+export interface InputDevice {
+  name: string;
+  channels: number;
+  default_rate: number;
+  is_default: boolean;
+}
+
+export interface SttModel {
+  id: string;
+  label: string;
+  description: string;
+  /** Whether the files the configured provider will load are on disk. */
+  downloaded: boolean;
+  /** Their download size, in MB. */
+  download_mb: number;
+  /** int8 for the CPU, fp32 for the GPU */
+  precision: string;
+}
+
+// -- graphics card (crates/flow-stt/src/gpu.rs) --------------------------------
+
+export interface GpuDevice {
+  name: string;
+  /** nvidia | amd | intel | apple | other */
+  vendor: string;
+  /** discrete | integrated, when a driver says */
+  kind: string | null;
+  /** Video memory in MiB, when a driver says. */
+  memory_mb: number | null;
+  /** CUDA compute capability such as "8.9", NVIDIA cards only. */
+  compute: string | null;
+  /** The kernel driver bound to the card on Linux. */
+  driver: string | null;
+}
+
+export interface GpuReport {
+  /** This build's GPU backend: cuda | webgpu, or null for a CPU-only build. */
+  backend: string | null;
+  /** Every graphics card found, the one recognition would use first. */
+  devices: GpuDevice[];
+  /** The card CUDA would run on, e.g. "NVIDIA GeForce RTX 4090 (24 GB)". */
+  gpu: string | null;
+  /** NVIDIA's driver version and the newest CUDA it supports. */
+  driver: string | null;
+  /** Whether recognition runs on `gpu` when the provider is auto. */
+  usable: boolean;
+  /** Why not, e.g. "cuDNN 9 is not installed". */
+  problem: string | null;
+  /** What would change that, when something can. */
+  fix: string | null;
+  /** CUDA libraries loaded from outside the loader's search path. */
+  loaded_from: string[];
+}
+
+export interface ComputeReport {
+  /** auto | gpu | cpu, as configured */
+  requested: string;
+  /** cuda | webgpu | cpu, what actually runs */
+  actual: string;
+  /** Why `actual` differs from `requested`, or empty. */
+  reason: string;
+}
+
+export interface ProviderSpec {
+  key: string;
+  label: string;
+  needs_api_key: boolean;
+  default_model: string;
+  suggested_models: string[];
+  note: string;
+  has_base_url: boolean;
+}
+
+export interface LearningSummary {
+  enabled: boolean;
+  count: number;
+  terms: string[];
+  style: string;
+}
+
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface UpdateCheck {
+  available: boolean;
+  version?: string;
+}
+
+export interface Permission {
+  id: string;
+  label: string;
+  granted: boolean;
+  required: boolean;
+  help: string;
+}
+
+export interface WizardMicResult {
+  ok: boolean;
+  /** Peak level heard during the test, 0..1. */
+  peak?: number;
+  detail?: string;
+}
+
+export interface WizardTranscribeResult {
+  text: string;
+  seconds: number;
+}
+
+export interface WizardPasteResult {
+  ok: boolean;
+  /** Whether the clipboard was put back afterwards. */
+  restored: boolean;
+  detail: string;
+}
+
+export interface WizardCleanupResult {
+  ok: boolean;
+  sample: string;
+}
+
+// -- events ------------------------------------------------------------------
+
+export interface StateEvent {
+  state: string;
+}
+export interface TextEvent {
+  text: string;
+}
+export interface LevelEvent {
+  level: number;
+}
+export interface DownloadEvent {
+  id: string;
+  file: string;
+  received: number;
+  total: number;
+  done: boolean;
+  error?: string;
+}
+export interface HotkeyEvent {
+  down: boolean;
+}
+
+export interface EventPayloads {
+  "flow:state": StateEvent;
+  "flow:text": TextEvent;
+  "flow:level": LevelEvent;
+  "flow:download": DownloadEvent;
+  "flow:hotkey": HotkeyEvent;
+}
+
+export function on<E extends keyof EventPayloads>(event: E, handler: (payload: EventPayloads[E]) => void): Promise<Unlisten> {
+  return listen<EventPayloads[E]>(event, handler);
+}
+
+// -- commands ----------------------------------------------------------------
+
+export const api = {
+  // overlay
+  overlayReady: () => invoke<void>("overlay_ready"),
+  overlayResize: (width: number, height: number) => invoke<void>("overlay_resize", { width, height }),
+
+  // config
+  getConfig: () => invoke<Config>("get_config"),
+  setConfigValue: (section: ConfigSection, key: string, value: ConfigValue) =>
+    invoke<void>("set_config_value", { section, key, value }),
+  getConfigPath: () => invoke<string>("get_config_path"),
+  openConfigFile: () => invoke<void>("open_config_file"),
+
+  // engine
+  getStatus: () => invoke<Status>("get_status"),
+  setRunning: (on: boolean) => invoke<void>("set_running", { on }),
+  restartEngine: () => invoke<void>("restart_engine"),
+  runDoctor: () => invoke<DoctorCheck[]>("run_doctor"),
+  copyDiagnostics: () => invoke<string>("copy_diagnostics"),
+  checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
+
+  // audio + recognition
+  listInputDevices: () => invoke<InputDevice[]>("list_input_devices"),
+  listSttModels: () => invoke<SttModel[]>("list_stt_models"),
+  downloadModel: (id: string) => invoke<void>("download_model", { id }),
+  getComputeReport: () => invoke<ComputeReport>("get_compute_report"),
+  detectGpu: () => invoke<GpuReport>("detect_gpu"),
+
+  // cleanup providers
+  listProviders: () => invoke<ProviderSpec[]>("list_providers"),
+  listProviderModels: (provider: string) => invoke<string[]>("list_provider_models", { provider }),
+  getKeySource: (provider: string) => invoke<string>("get_key_source", { provider }),
+  setApiKey: (provider: string, key: string) => invoke<void>("set_api_key", { provider, key }),
+  clearApiKey: (provider: string) => invoke<void>("clear_api_key", { provider }),
+
+  // learning
+  getLearningSummary: () => invoke<LearningSummary>("get_learning_summary"),
+  forgetHistory: () => invoke<number>("forget_history"),
+
+  // desktop
+  setHotkey: (combo: string) => invoke<void>("set_hotkey", { combo }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (on: boolean) => invoke<void>("set_autostart", { on }),
+  getPermissions: () => invoke<Permission[]>("get_permissions"),
+  requestPermission: (id: string) => invoke<void>("request_permission", { id }),
+
+  // first-run wizard
+  wizardTestMic: () => invoke<WizardMicResult | null | undefined>("wizard_test_mic"),
+  wizardTestTranscribe: () => invoke<WizardTranscribeResult>("wizard_test_transcribe"),
+  wizardTestPaste: () => invoke<WizardPasteResult>("wizard_test_paste"),
+  wizardTestCleanup: () => invoke<WizardCleanupResult>("wizard_test_cleanup"),
+  wizardComplete: () => invoke<void>("wizard_complete"),
+};

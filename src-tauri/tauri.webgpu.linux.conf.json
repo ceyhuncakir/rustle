@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "linux": {
+      "deb": { "files": { "/usr/lib/flow/libwebgpu_dawn.so": "../target/release/libwebgpu_dawn.so" } },
+      "rpm": { "files": { "/usr/lib/flow/libwebgpu_dawn.so": "../target/release/libwebgpu_dawn.so" } },
+      "appimage": { "files": { "/usr/lib/flow/libwebgpu_dawn.so": "../target/release/libwebgpu_dawn.so" } }
+    }
+  }
+}

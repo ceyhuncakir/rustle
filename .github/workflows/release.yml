@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      # Every installer recognises speech on the GPU through WebGPU, and
+      # carries Dawn beside the program (see the tauri.webgpu.*.conf.json).
+      # No Intel Mac: ort has no prebuilt ONNX Runtime for x86_64-apple-darwin.
+      # Linux on 24.04: that runtime needs glibc 2.38.
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            os: macos-latest
+            args: --target aarch64-apple-darwin --features webgpu --config src-tauri/tauri.webgpu.macos.conf.json
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            args: --features webgpu --config src-tauri/tauri.webgpu.linux.conf.json
+          - name: Windows x86_64
+            os: windows-latest
+            args: --features webgpu --config src-tauri/tauri.webgpu.windows.conf.json
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ contains(matrix.args, 'aarch64-apple') && 'aarch64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libasound2-dev libdbus-1-dev libxcb-ewmh-dev libxcb-randr0-dev pkg-config libxdo-dev xdg-utils
+      - run: pnpm install --frozen-lockfile
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (generate with `pnpm tauri signer generate`):
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing + notarisation (optional until the account exists):
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "Flow v__VERSION__"
+          releaseBody: "See the changelog for what changed."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
