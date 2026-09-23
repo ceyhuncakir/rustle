@@ -7,8 +7,12 @@ pub enum Session {
     Windows,
     MacOs,
     X11,
-    /// GNOME on Wayland. `extension` says whether the Flow Shell extension is
-    /// on the session bus right now.
+    /// GNOME Shell, served by the Flow Shell extension when `extension` says
+    /// it is on the session bus. That is GNOME on Wayland, and GNOME on X11
+    /// too once the extension is there: it grabs the same shortcut, so the
+    /// X11 backend would only fight it. GNOME on X11 without the extension
+    /// is plain [`Session::X11`], so `extension: false` means Wayland. The
+    /// name predates the X11 case and is kept for callers.
     GnomeWayland {
         extension: bool,
     },
@@ -25,7 +29,7 @@ impl fmt::Display for Session {
             Session::Windows => write!(f, "Windows"),
             Session::MacOs => write!(f, "macOS"),
             Session::X11 => write!(f, "Linux X11"),
-            Session::GnomeWayland { extension: true } => write!(f, "GNOME Wayland (Flow extension present)"),
+            Session::GnomeWayland { extension: true } => write!(f, "GNOME Shell (Flow extension present)"),
             Session::GnomeWayland { extension: false } => write!(f, "GNOME Wayland (Flow extension missing)"),
             Session::KdeWayland => write!(f, "KDE Plasma Wayland"),
             Session::LayerShellWayland => write!(f, "Wayland (layer-shell compositor)"),
@@ -94,13 +98,19 @@ pub fn detect_linux(env: &LinuxEnv) -> Session {
         }
     }
 
+    let desktop = env.current_desktop.as_deref().unwrap_or("").to_ascii_lowercase();
+    let gnome = desktop.contains("gnome");
     let wayland = env.wayland_display.is_some() || env.session_type.as_deref() == Some("wayland");
     if !wayland {
+        // The extension runs on GNOME's X11 session too and grabs the same
+        // shortcut; an X11 grab next to it would only fight over the key.
+        if gnome && env.extension_present {
+            return Session::GnomeWayland { extension: true };
+        }
         return Session::X11;
     }
 
-    let desktop = env.current_desktop.as_deref().unwrap_or("").to_ascii_lowercase();
-    if desktop.contains("gnome") {
+    if gnome {
         return Session::GnomeWayland { extension: env.extension_present };
     }
     if desktop.contains("kde") || desktop.contains("plasma") {
@@ -139,8 +149,28 @@ mod tests {
 
     #[test]
     fn x11_sessions() {
-        assert_eq!(detect_linux(&env("x11", "GNOME", false)), Session::X11);
         assert_eq!(detect_linux(&env("x11", "XFCE", false)), Session::X11);
+        let mut gnome = env("x11", "GNOME", false);
+        gnome.extension_present = false;
+        assert_eq!(detect_linux(&gnome), Session::X11);
+    }
+
+    #[test]
+    fn gnome_x11_with_the_extension_uses_it() {
+        assert_eq!(detect_linux(&env("x11", "GNOME", false)), Session::GnomeWayland { extension: true });
+        assert_eq!(
+            detect_linux(&env("x11", "ubuntu:GNOME", false)),
+            Session::GnomeWayland { extension: true }
+        );
+        // Only GNOME Shell carries the extension; the flag alone means nothing.
+        assert_eq!(detect_linux(&env("x11", "XFCE", false)), Session::X11);
+    }
+
+    #[test]
+    fn gnome_wayland_without_the_extension() {
+        let mut e = env("wayland", "GNOME", true);
+        e.extension_present = false;
+        assert_eq!(detect_linux(&e), Session::GnomeWayland { extension: false });
     }
 
     #[test]

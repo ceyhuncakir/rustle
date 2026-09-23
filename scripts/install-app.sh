@@ -66,7 +66,15 @@ if [[ ${XDG_CURRENT_DESKTOP:-} == *GNOME* ]]; then
     "$ROOT/scripts/install.sh"
 fi
 
-systemctl --user daemon-reload
+# Over SSH or in a container there may be no user manager; the unit file is
+# in place either way and loads at the next graphical login.
+if systemctl --user daemon-reload 2>/dev/null; then
+    service=yes
+else
+    service=no
+    echo "note: no systemd user manager here (SSH session or container?); flow.service is" >&2
+    echo "      installed and loads at your next desktop login." >&2
+fi
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
@@ -80,5 +88,9 @@ esac
 echo
 echo "next:"
 echo "  flow doctor                       # every part should be ok"
-echo "  systemctl --user start flow       # headless, driven by the Shell extension"
+if [[ $service == yes ]]; then
+    echo "  systemctl --user start flow       # headless, driven by the Shell extension"
+else
+    echo "  flow --headless                   # headless, driven by the Shell extension"
+fi
 echo "  flow                              # or the tray app with the settings window"

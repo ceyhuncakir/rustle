@@ -18,12 +18,31 @@ version and desktop (for Linux: X11 / GNOME Wayland / KDE Wayland / Hyprland).
 - [ ] Hold the hotkey, speak, release: island shows listening → thinking →
       inserting, text lands in the focused app, island hides.
 - [ ] Tap the hotkey (under 350 ms), speak, tap again: same result.
-- [ ] Cancel shortcut while recording: island hides, nothing pasted.
-- [ ] Release after less than 0.35 s: "Too short" error, hides after 2.5 s.
+- [ ] Tap mode with a one-word take, second tap held down a moment: the
+      paste waits until the modifier is up; the app never sees Super+Ctrl+V
+      (no stray shortcut fires).
+- [ ] Cancel shortcut while recording (GNOME default Super+Ctrl+Escape):
+      island hides, nothing pasted. On GNOME the journal has no "Overwriting
+      existing binding of keysym ff1b", and Super+Escape still does Mutter's
+      restore-shortcuts.
+- [ ] Two taps in quick succession (under 0.35 s of audio between them):
+      "Too short" error, hides after 2.5 s.
 - [ ] Hold in silence: "No speech detected".
 - [ ] Paste into: a plain text editor, VS Code, a browser text field, a
       terminal.
+- [ ] Terminal paste on Linux (GNOME Terminal or Ptyxis, Konsole, kitty,
+      Alacritty, foot, WezTerm, Ghostty): the text lands through
+      Ctrl+Shift+V; no stray ^V or literal "v" appears. Windows Terminal and
+      macOS Terminal paste with Ctrl+V / Cmd+V.
+- [ ] Non-Latin layout: with a Latin and a Russian (or Greek) layout
+      configured and the Russian one active, dictation still pastes, into an
+      editor and into a terminal; on GNOME the journal has no "No keycode
+      found for keyval". Dvorak active: still pastes (GNOME, X11, Windows).
 - [ ] Clipboard restore: copy text first, dictate, paste again → original text.
+- [ ] Copy something else right after a dictation lands (within half a
+      second): your copy is kept, not replaced by the old clipboard.
+- [ ] Clipboard with nothing copied beforehand: after a dictation the text
+      is still pasteable a minute later (X11: from another app, too).
 - [ ] Clipboard restore with an image copied: dictation pastes; image is lost
       (documented limitation) and no crash.
 - [ ] The island never takes keyboard focus from the target app.
@@ -66,7 +85,8 @@ version and desktop (for Linux: X11 / GNOME Wayland / KDE Wayland / Hyprland).
       clears it.
 - [ ] "Check setup" is green on a working install and names the broken part
       otherwise.
-- [ ] "Copy diagnostics" puts a useful report on the clipboard.
+- [ ] "Copy diagnostics" puts a useful report on the clipboard, and it can
+      still be pasted after the settings window is closed.
 
 ## Platform specifics
 
@@ -79,22 +99,36 @@ version and desktop (for Linux: X11 / GNOME Wayland / KDE Wayland / Hyprland).
 - [ ] Accessibility prompt appears on first paste; paste works after grant.
 - [ ] Screen Recording declined: dictation still works, window titles empty.
 - [ ] Terminal with "Secure Keyboard Entry" on: hotkey still works.
-- [ ] Non-US keyboard layout (e.g. Dvorak, AZERTY): paste chord still works.
+- [ ] Non-US keyboard layout (AZERTY, QWERTZ, Russian): paste chord still
+      works. Plain Dvorak needs the "Dvorak - QWERTY ⌘" layout (the chord is
+      sent as the raw V key code); note if that is not the case.
 - [ ] Notarised DMG opens with no Gatekeeper warning.
 - [ ] Island is a non-activating panel: the app under it keeps focus.
 
 ### Linux GNOME Wayland
 - [ ] Extension enabled after logout; `flow doctor` reports its version.
 - [ ] `flow --headless` under the user service works without any window.
+- [ ] With the service enabled, log out and back in: the hotkey works on
+      the first try (the service waits for the extension to appear).
+- [ ] Extension on GNOME 50 / 51 (Fedora 44, Ubuntu 26.04): loads, island,
+      hotkey and paste work.
 - [ ] Overview open while dictating: documented quirk, no crash.
 
 ### Linux KDE / Hyprland
 - [ ] Paste helper detected (dotool or ydotool); missing helper is reported.
+- [ ] A helper that cannot work (ydotool without ydotoold, dotool without
+      /dev/uinput access) is named with the reason in "Check setup", and
+      pasting falls through to the next helper instead of losing the text.
+- [ ] No XWayland (e.g. sway with `xwayland disable`): clipboard and paste
+      still work.
 - [ ] Layer-shell island does not steal focus; paste-back self-test passes.
 - [ ] Overlay mode "off" and "window" both behave as described.
 
 ### Linux X11
 - [ ] Hotkey grabbed; paste via XTEST works in GTK and Qt apps.
+- [ ] GNOME on X11 with the extension enabled: `flow doctor` says "GNOME
+      Shell (Flow extension present)"; the extension handles the hotkey and
+      paste, and the shortcut fires once, not twice.
 
 ## Update
 

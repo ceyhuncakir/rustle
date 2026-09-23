@@ -1,20 +1,31 @@
-//! GNOME Wayland: everything goes through the Flow Shell extension.
+//! GNOME Shell: everything goes through the Flow Shell extension.
 //!
 //! Mutter has no layer-shell, exposes no virtual keyboard to clients, and
 //! only the Shell can see the focused window. The extension therefore owns
 //! the island, the hotkey, focus context and text injection, and publishes
 //! them on the session bus as `ai.flow.Island`. This module is the client.
+//! GNOME on X11 uses it too whenever the extension is there, because the
+//! extension grabs the same shortcut an X11 grab would.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flow_core::engine::{
     DesktopError, Event, Focus, FocusContext, Hotkey, HotkeyEvent, Injector, Overlay, State,
 };
+use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::Connection;
 
 pub const BUS_NAME: &str = "ai.flow.Island";
+
+/// Longest wait for any reply from the extension. Every method returns at
+/// once (InsertText finishes its paste afterwards), so this only trips when
+/// the Shell is wedged, and then an error beats a daemon stuck forever.
+const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often [`wait_for_extension`] looks for the bus name.
+const PRESENCE_POLL: Duration = Duration::from_millis(250);
 
 #[zbus::proxy(
     interface = "ai.flow.Island",
@@ -33,7 +44,9 @@ trait Island {
     fn set_text(&self, text: &str) -> zbus::Result<()>;
     #[zbus(no_reply)]
     fn push_level(&self, level: f64) -> zbus::Result<()>;
-    #[zbus(no_reply)]
+    /// Waits for the reply, unlike the calls above: a lost dictation must
+    /// surface as an error, not vanish because the extension went away or
+    /// threw.
     fn insert_text(&self, text: &str) -> zbus::Result<()>;
     fn get_focus_context(&self) -> zbus::Result<HashMap<String, String>>;
 
@@ -52,10 +65,44 @@ trait Island {
 
 /// Whether the extension currently owns its bus name.
 pub fn extension_present() -> bool {
-    let Ok(conn) = Connection::session() else { return false };
-    let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&conn) else { return false };
-    let Ok(name) = zbus::names::BusName::try_from(BUS_NAME) else { return false };
-    dbus.name_has_owner(name).unwrap_or(false)
+    bus().is_some_and(|dbus| owned(&dbus).unwrap_or(false))
+}
+
+/// Block until the extension owns its bus name, for at most `timeout`.
+///
+/// At login `flow --headless` can start before the Shell has loaded its
+/// extensions; checking once would leave it running with no hotkey. Returns
+/// whether the extension showed up.
+pub fn wait_for_extension(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut dbus = None;
+    loop {
+        // The session bus itself may not be up yet either, so keep trying
+        // to connect as well, and start over if the connection breaks.
+        if dbus.is_none() {
+            dbus = bus();
+        }
+        match dbus.as_ref().map(owned) {
+            Some(Ok(true)) => return true,
+            Some(Err(_)) => dbus = None,
+            _ => {}
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        std::thread::sleep(PRESENCE_POLL.min(left));
+    }
+}
+
+fn bus() -> Option<DBusProxy<'static>> {
+    let conn = Connection::session().ok()?;
+    DBusProxy::new(&conn).ok()
+}
+
+fn owned(dbus: &DBusProxy<'_>) -> zbus::Result<bool> {
+    let name = zbus::names::BusName::try_from(BUS_NAME)?;
+    Ok(dbus.name_has_owner(name)?)
 }
 
 pub struct GnomeIsland {
@@ -72,7 +119,7 @@ impl GnomeIsland {
                  (gnome-extensions enable flow@ceyhun.dev, then log out and back in)"
             );
         }
-        let conn = Connection::session()?;
+        let conn = zbus::blocking::connection::Builder::session()?.method_timeout(CALL_TIMEOUT).build()?;
         let proxy = IslandProxy::new(&conn)?;
         Ok(GnomeIsland { proxy })
     }

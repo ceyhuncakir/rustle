@@ -24,7 +24,7 @@ const HOLD_THRESHOLD_MS = 350;
 const POLL_MS = 40;
 const DEBOUNCE_MS = 150;
 
-const EXTENSION_VERSION = '4';
+const EXTENSION_VERSION = '5';
 const BUS_NAME = 'ai.flow.Island';
 const OBJECT_PATH = '/ai/flow/Island';
 
@@ -89,13 +89,17 @@ export default class FlowExtension extends Extension {
 
         // Cancel: stop recording and hide without pasting. Escape alone
         // cannot be grabbed globally without breaking every app, so it is a
-        // modifier chord, <Super>Escape by default.
-        Main.wm.addKeybinding(
+        // modifier chord, <Super><Control>Escape by default: Mutter already
+        // owns <Super>Escape (restore shortcuts) and <Super><Shift>Escape
+        // (cancel input capture).
+        const cancel = Main.wm.addKeybinding(
             'cancel-dictation',
             this._settings,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._onCancel());
+        if (cancel === Meta.KeyBindingAction.NONE)
+            console.error('flow: could not register the cancel shortcut');
 
         if (action === Meta.KeyBindingAction.NONE) {
             console.error('flow: could not register the dictation shortcut - ' +
@@ -306,8 +310,13 @@ export default class FlowExtension extends Extension {
         this._guard(() => this._island.pushLevel(level));
     }
 
+    // Not guarded, unlike the calls above: the daemon waits for this reply,
+    // and Gio logs an exception thrown here and returns it to the caller as
+    // a D-Bus error, where a swallowed one would lose the dictation without
+    // a trace. The paste itself finishes after the reply; insertText only
+    // schedules it.
     InsertText(text) {
-        this._guard(() => this._injector.insertText(text));
+        this._injector.insertText(text);
     }
 
     GetFocusContext() {

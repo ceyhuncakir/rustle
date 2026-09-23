@@ -12,6 +12,8 @@ anyhow.workspace = true
 log.workspace = true
 zbus = { version = "5", features = ["blocking-api"] }
 enigo = "0.6"
-arboard = "3"
+# wayland-data-control: the clipboard on KDE and wlroots sessions with no
+# XWayland. Mutter lacks the protocol, so GNOME still goes through XWayland.
+arboard = { version = "3", features = ["wayland-data-control"] }
 active-win-pos-rs = "0.11"
 thiserror.workspace = true

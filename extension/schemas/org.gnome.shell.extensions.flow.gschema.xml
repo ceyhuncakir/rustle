@@ -19,9 +19,12 @@
       </description>
     </key>
     <key name="cancel-dictation" type="as">
-      <default><![CDATA[['<Super>Escape']]]></default>
+      <default><![CDATA[['<Super><Control>Escape']]]></default>
       <summary>Cancel the current dictation</summary>
-      <description>Stops recording and hides the island without pasting anything.</description>
+      <description>
+        Stops recording and hides the island without pasting anything.
+        Mutter already uses Super+Escape and Super+Shift+Escape.
+      </description>
     </key>
   </schema>
 </schemalist>

@@ -39,6 +39,8 @@ fi
 
 echo "shell log: $FLOW_LOG"
 
+# The inner script expands its variables itself, in the child session.
+# shellcheck disable=SC2016
 exec dbus-run-session -- bash -c '
     set -u
 

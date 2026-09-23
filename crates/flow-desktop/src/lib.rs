@@ -1,9 +1,9 @@
 //! Everything only the desktop can do: show the island, hear the hotkey,
 //! read which app is focused, and paste into it.
 //!
-//! `#[cfg(target_os)]` appears exactly once, here at the module root. Inside
-//! `linux/` the choice between GNOME (the Shell extension over D-Bus), X11 and
-//! the Wayland compositors is made at runtime by [`session::detect`], so one
+//! Platform modules are chosen once, here at the module root. Inside `linux/`
+//! the choice between GNOME (the Shell extension over D-Bus), X11 and the
+//! Wayland compositors is made at runtime by [`session::detect`], so one
 //! Linux binary serves every session and degrades gracefully.
 //!
 //! The Tauri app only ever matches on [`OverlayChoice`] and [`HotkeySource`]:
@@ -18,10 +18,12 @@ use flow_core::engine::{Focus, Hotkey, Injector, Overlay};
 mod clipboard;
 pub mod generic;
 pub mod session;
+mod terminal;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+pub use clipboard::copy_text;
 pub use session::Session;
 
 /// How the island should be hosted on this desktop.
