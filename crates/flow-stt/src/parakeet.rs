@@ -13,6 +13,8 @@
 //! Both GPU backends run the fp32 export, like CUDA always has.
 
 use std::borrow::Cow;
+use std::mem::ManuallyDrop;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
@@ -34,6 +36,26 @@ use crate::vocab::Vocab;
 
 /// Samples per second the model expects.
 const SAMPLE_RATE: u32 = 16_000;
+
+/// The most audio the encoder is given at once: 60 s, the length the video
+/// memory check in [`crate::gpu`] was measured with. Its attention spans the
+/// whole input, so memory grows with the square of the length (about 1.8 GB
+/// per attention tensor at 10 minutes), and a long dictation in toggle mode
+/// would otherwise run the GPU out of memory and lose the take. Longer audio
+/// is recognised in pieces; anything up to this runs exactly as before.
+const MAX_CHUNK: usize = 60 * SAMPLE_RATE as usize;
+
+/// How far before a piece's end to look for a quiet place to cut: the last
+/// 10 s of it.
+const CUT_SEARCH: usize = 10 * SAMPLE_RATE as usize;
+
+/// The stretch whose energy decides the cut (100 ms), and the step the
+/// search moves it by (10 ms).
+const CUT_WINDOW: usize = SAMPLE_RATE as usize / 10;
+const CUT_STEP: usize = SAMPLE_RATE as usize / 100;
+
+/// Input samples per encoder frame: a 10 ms hop, subsampled 8x.
+const SAMPLES_PER_FRAME: usize = 8 * SAMPLE_RATE as usize / 100;
 
 /// What the recogniser ended up running on, and why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -106,6 +128,11 @@ pub struct Parakeet {
     loaded: RwLock<Option<Loaded>>,
     /// Held while building, so two callers of `load` do not both build.
     building: Mutex<()>,
+    /// Set by [`unload`](Parakeet::unload), cleared by [`load`](Transcriber::load).
+    /// While set, recognising does not load the sessions again by itself: a
+    /// dictation still finishing when Flow was switched off or told to quit
+    /// must not bring the model back.
+    parked: AtomicBool,
 }
 
 /// Held while a GPU session is built or run, and while the GPU is given
@@ -125,7 +152,8 @@ fn gpu_lock(device: Device) -> Option<MutexGuard<'static, ()>> {
 
 struct Loaded {
     preprocessor: Mutex<Session>,
-    encoder: Mutex<Session>,
+    /// Dropped by hand, under the GPU lock; see `Drop for Loaded`.
+    encoder: ManuallyDrop<Mutex<Session>>,
     /// Where the encoder runs; the other two always run on the CPU.
     device: Device,
     decoder: Mutex<Session>,
@@ -136,6 +164,18 @@ struct Loaded {
     /// Last, so it is dropped after the sessions: [`release_runtime`] and
     /// [`free_gpu_context`] wait for every one of these to be gone.
     _live: Live,
+}
+
+impl Drop for Loaded {
+    /// A GPU session is torn down under the GPU lock, like it is built and
+    /// run: releasing it uses the device, which another recogniser (say, a
+    /// new one warming up after a settings change while a dictation on the
+    /// old one finishes) may be using at that moment.
+    fn drop(&mut self) {
+        let _gpu = gpu_lock(self.device);
+        // SAFETY: dropped once, here, and never touched again.
+        unsafe { ManuallyDrop::drop(&mut self.encoder) };
+    }
 }
 
 /// Counts the recognisers loaded or being loaded.
@@ -164,6 +204,7 @@ impl Parakeet {
             provider: provider.to_string(),
             loaded: RwLock::new(None),
             building: Mutex::new(()),
+            parked: AtomicBool::new(false),
         }
     }
 
@@ -177,9 +218,13 @@ impl Parakeet {
     }
 
     /// Hand the sessions back, and with them the memory the encoder holds on
-    /// the GPU. Waits for a recognition in progress. The next use loads
-    /// again. Returns whether anything was loaded.
+    /// the GPU. Waits for a recognition in progress. Until the next
+    /// [`load`](Transcriber::load), recognising fails rather than loading the
+    /// model again. Returns whether anything was loaded.
     pub fn unload(&self) -> bool {
+        // Parked first: a build finishing from here on sees it and throws
+        // its sessions away instead of storing them.
+        self.parked.store(true, Ordering::SeqCst);
         let loaded = self.loaded.write().unwrap_or_else(|e| e.into_inner()).take();
         let Some(loaded) = loaded else { return false };
         let device = loaded.device.name();
@@ -190,8 +235,11 @@ impl Parakeet {
 
     /// Recognise, keeping the token ids and frame indices.
     pub fn transcribe_detailed(&self, audio: &[f32], sample_rate: u32) -> anyhow::Result<Transcription> {
+        if sample_rate == 0 {
+            bail!("audio with a sample rate of 0");
+        }
         if audio.is_empty() {
-            self.load()?;
+            self.ensure_loaded()?;
             return Ok(Transcription::default());
         }
         let started = Instant::now();
@@ -200,7 +248,7 @@ impl Parakeet {
         } else {
             Cow::Owned(dsp::resample(audio, sample_rate, SAMPLE_RATE))
         };
-        let result = self.with_loaded(|loaded| loaded.recognize(&audio16))?;
+        let result = self.with_loaded(|loaded| loaded.recognize_long(&audio16))?;
         let elapsed = started.elapsed().as_secs_f64();
         let seconds = audio.len() as f64 / sample_rate as f64;
         info!(
@@ -222,15 +270,46 @@ impl Parakeet {
     /// Run `f` on the loaded sessions, loading them first if need be. The
     /// read lock keeps [`unload`](Self::unload) waiting until `f` is done.
     fn with_loaded<T>(&self, f: impl FnOnce(&Loaded) -> anyhow::Result<T>) -> anyhow::Result<T> {
-        let mut f = Some(f);
-        loop {
-            self.load()?;
-            let guard = self.read();
-            // An unload may have slipped in between; then load again.
-            if let Some(loaded) = guard.as_ref() {
-                return (f.take().expect("called once"))(loaded);
-            }
+        self.ensure_loaded()?;
+        let guard = self.read();
+        // An unload that slipped in between wins: loading again would undo
+        // switching dictation off.
+        let loaded = guard.as_ref().ok_or_else(unloaded)?;
+        f(loaded)
+    }
+
+    /// Build the sessions unless they are loaded, or parked by an unload.
+    fn ensure_loaded(&self) -> anyhow::Result<()> {
+        if self.read().is_some() {
+            return Ok(());
         }
+        let _building = self.building.lock().unwrap_or_else(|e| e.into_inner());
+        // Whoever held the lock before us may have finished the job.
+        if self.read().is_some() {
+            return Ok(());
+        }
+        if self.parked.load(Ordering::SeqCst) {
+            return Err(unloaded());
+        }
+        let started = Instant::now();
+        let loaded = self.build()?;
+        let mut slot = self.loaded.write().unwrap_or_else(|e| e.into_inner());
+        // Checked under the write lock, which `unload` takes after parking:
+        // either it sees these sessions and takes them, or they go here.
+        if self.parked.load(Ordering::SeqCst) {
+            drop(slot);
+            drop(loaded);
+            return Err(unloaded());
+        }
+        info!(
+            "loaded {} on {} in {:.1}s ({})",
+            self.id,
+            loaded.report.actual,
+            started.elapsed().as_secs_f64(),
+            loaded.report.reason
+        );
+        *slot = Some(loaded);
+        Ok(())
     }
 
     fn build(&self) -> anyhow::Result<Loaded> {
@@ -300,16 +379,18 @@ impl Parakeet {
         debug!("{}", ort::info());
         let preprocessor = build_session(&nemo, Device::Cpu)?;
         let decoder = build_session(&file("decoder_joint-model")?, Device::Cpu)?;
+        let state_shape = state_shape(&decoder)?;
+        // Last, so from here on only `Loaded` owns it, and drops it under the
+        // GPU lock.
         let encoder = {
             let _gpu = gpu_lock(device);
             build_session(&file("encoder-model")?, device)?
         };
-        let state_shape = state_shape(&decoder)?;
         debug!("sessions built in {:.1}s", started.elapsed().as_secs_f64());
 
         let loaded = Loaded {
             preprocessor: Mutex::new(preprocessor),
-            encoder: Mutex::new(encoder),
+            encoder: ManuallyDrop::new(Mutex::new(encoder)),
             device,
             decoder: Mutex::new(decoder),
             vocab,
@@ -327,26 +408,12 @@ impl Parakeet {
 }
 
 impl Transcriber for Parakeet {
+    /// Load the sessions, and undo an earlier [`unload`](Parakeet::unload)
+    /// (switching dictation on). An unload while this builds wins, and this
+    /// then fails.
     fn load(&self) -> anyhow::Result<()> {
-        if self.read().is_some() {
-            return Ok(());
-        }
-        let _building = self.building.lock().unwrap_or_else(|e| e.into_inner());
-        // Whoever held the lock before us may have finished the job.
-        if self.read().is_some() {
-            return Ok(());
-        }
-        let started = Instant::now();
-        let loaded = self.build()?;
-        info!(
-            "loaded {} on {} in {:.1}s ({})",
-            self.id,
-            loaded.report.actual,
-            started.elapsed().as_secs_f64(),
-            loaded.report.reason
-        );
-        *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
-        Ok(())
+        self.parked.store(false, Ordering::SeqCst);
+        self.ensure_loaded()
     }
 
     fn loaded(&self) -> bool {
@@ -366,6 +433,32 @@ impl Loaded {
         self.recognize(&warm_up_noise()).context("warm-up recognition")?;
         info!("warm-up took {:.2} s", started.elapsed().as_secs_f64());
         Ok(())
+    }
+
+    /// [`recognize`](Self::recognize), in pieces of at most [`MAX_CHUNK`]
+    /// cut where it is quietest, one after the other, with the tokens joined
+    /// and their frames counted from the start of the whole take.
+    fn recognize_long(&self, audio: &[f32]) -> anyhow::Result<Transcription> {
+        let pieces = chunks(audio);
+        if pieces.len() == 1 {
+            return self.recognize(audio);
+        }
+        info!(
+            "recognising {:.0} s of audio in {} pieces",
+            audio.len() as f64 / SAMPLE_RATE as f64,
+            pieces.len()
+        );
+        let mut whole = Transcription::default();
+        for piece in pieces {
+            // Rounded, so a token's frame is within one frame of where a
+            // single pass would have put it.
+            let offset = (piece.start + SAMPLES_PER_FRAME / 2) / SAMPLES_PER_FRAME;
+            let part = self.recognize(&audio[piece])?;
+            whole.tokens.extend(part.tokens);
+            whole.frames.extend(part.frames.into_iter().map(|f| f + offset));
+        }
+        whole.text = self.vocab.text(&whole.tokens)?.trim().to_string();
+        Ok(whole)
     }
 
     fn recognize(&self, audio: &[f32]) -> anyhow::Result<Transcription> {
@@ -458,6 +551,42 @@ impl Loaded {
             },
         })
     }
+}
+
+fn unloaded() -> anyhow::Error {
+    anyhow!("the speech model was unloaded (Flow was switched off or is quitting)")
+}
+
+/// Where to split `audio` so no piece is longer than [`MAX_CHUNK`]: each cut
+/// is the middle of the quietest 100 ms in the last [`CUT_SEARCH`] before a
+/// piece would get too long, so it falls between words where there is a
+/// pause. One range, the whole of it, for audio that fits.
+fn chunks(audio: &[f32]) -> Vec<Range<usize>> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while audio.len() - start > MAX_CHUNK {
+        let end = start + MAX_CHUNK;
+        let cut = quietest(&audio[end - CUT_SEARCH..end]) + end - CUT_SEARCH;
+        pieces.push(start..cut);
+        start = cut;
+    }
+    pieces.push(start..audio.len());
+    pieces
+}
+
+/// The middle of the [`CUT_WINDOW`] with the least energy in `audio`, the
+/// latest one on a tie (so digital silence still leaves long pieces).
+fn quietest(audio: &[f32]) -> usize {
+    let mut best = (f64::INFINITY, audio.len() / 2);
+    let mut at = 0;
+    while at + CUT_WINDOW <= audio.len() {
+        let energy: f64 = audio[at..at + CUT_WINDOW].iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+        if energy <= best.0 {
+            best = (energy, at + CUT_WINDOW / 2);
+        }
+        at += CUT_STEP;
+    }
+    best.1
 }
 
 fn lock<'a>(session: &'a Mutex<Session>, name: &str) -> anyhow::Result<MutexGuard<'a, Session>> {
@@ -601,14 +730,19 @@ pub fn free_gpu_context() -> bool {
 /// loaded, since its sessions depend on the runtime: the OS reclaims the
 /// GPU at exit either way. Returns whether it released.
 pub fn release_runtime() -> bool {
-    let live = LIVE.load(Ordering::SeqCst);
-    if live > 0 {
-        warn!("{live} recogniser(s) still loaded; leaving ONNX Runtime to the OS");
-        return false;
-    }
     // Only a runtime that was set up; asking for one here would create it.
     let Some(Some(env)) = KEPT.get() else { return false };
+    // Flag first, count second; a build counts itself first and checks the
+    // flag second (`build_on`, `build_session`). So a build racing this one
+    // either sees the flag and stops, or is counted here and the flag is
+    // taken back.
     if RUNTIME_RELEASED.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let live = LIVE.load(Ordering::SeqCst);
+    if live > 0 {
+        RUNTIME_RELEASED.store(false, Ordering::SeqCst);
+        warn!("{live} recogniser(s) still loaded; leaving ONNX Runtime to the OS");
         return false;
     }
     let _gpu = lock_gpu();
@@ -632,8 +766,12 @@ fn state_shape(decoder: &Session) -> anyhow::Result<[usize; 3]> {
         .find(|o| o.name() == "input_states_1")
         .context("decoder_joint has no input_states_1")?;
     let shape = input.dtype().tensor_shape().context("input_states_1 is not a tensor")?;
+    // Parakeet's state is a few thousand floats; the cap keeps a broken file
+    // from asking for more memory than exists when the zero state is made.
     match shape[..] {
-        [layers, _, hidden] if layers > 0 && hidden > 0 => Ok([layers as usize, 1, hidden as usize]),
+        [layers, _, hidden] if layers > 0 && hidden > 0 && layers.saturating_mul(hidden) <= 1 << 24 => {
+            Ok([layers as usize, 1, hidden as usize])
+        }
         _ => bail!("unexpected input_states_1 shape {shape}"),
     }
 }
@@ -689,6 +827,67 @@ mod tests {
         let err = p.load().unwrap_err();
         assert!(err.to_string().contains("unknown stt provider"), "{err}");
         assert!(!p.loaded());
+    }
+
+    #[test]
+    fn an_unloaded_recogniser_stays_unloaded_until_load() {
+        // "tpu" fails the moment a build starts, which shows whether one did.
+        let p = Parakeet::new("nemo-parakeet-tdt-0.6b-v3", "tpu");
+        assert!(!p.unload());
+        for _ in 0..2 {
+            let err = p.transcribe(&[0.1; 1600], 16_000).unwrap_err();
+            assert!(err.to_string().contains("unloaded"), "{err}");
+        }
+        let err = p.load().unwrap_err();
+        assert!(err.to_string().contains("unknown stt provider"), "{err}");
+        let err = p.transcribe(&[0.1; 1600], 16_000).unwrap_err();
+        assert!(err.to_string().contains("unknown stt provider"), "after load: {err}");
+    }
+
+    #[test]
+    fn a_sample_rate_of_zero_is_an_error() {
+        let p = Parakeet::new("nemo-parakeet-tdt-0.6b-v3", "cpu");
+        assert!(p.transcribe(&[0.1; 1600], 0).is_err());
+    }
+
+    /// 220 Hz at `amp`, `seconds` long.
+    fn tone(seconds: f64, amp: f32) -> Vec<f32> {
+        let n = (seconds * SAMPLE_RATE as f64) as usize;
+        (0..n).map(|i| amp * (i as f32 * 220.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin()).collect()
+    }
+
+    #[test]
+    fn audio_that_fits_is_one_piece() {
+        assert_eq!(chunks(&[]), vec![0..0]);
+        assert_eq!(chunks(&vec![0.5; MAX_CHUNK]), vec![0..MAX_CHUNK]);
+    }
+
+    #[test]
+    fn long_audio_is_cut_in_its_pauses() {
+        // "Speech" with a 300 ms pause at 55 s and at 108 s, 150 s in all.
+        let mut audio = tone(55.0, 0.3);
+        let first_pause = audio.len()..audio.len() + 4800;
+        audio.extend(vec![0.0; 4800]);
+        audio.extend(tone(52.7, 0.3));
+        let second_pause = audio.len()..audio.len() + 4800;
+        audio.extend(vec![0.0; 4800]);
+        audio.extend(tone(41.7, 0.3));
+
+        let pieces = chunks(&audio);
+        assert_eq!(pieces.len(), 3, "{pieces:?}");
+        assert_eq!(pieces[0].start, 0);
+        assert_eq!(pieces[2].end, audio.len());
+        assert!(pieces.windows(2).all(|w| w[0].end == w[1].start), "{pieces:?}");
+        assert!(pieces.iter().all(|p| p.len() <= MAX_CHUNK), "{pieces:?}");
+        assert!(first_pause.contains(&pieces[0].end), "{pieces:?}");
+        assert!(second_pause.contains(&pieces[1].end), "{pieces:?}");
+    }
+
+    #[test]
+    fn long_silence_is_cut_late() {
+        let pieces = chunks(&vec![0.0; 3 * MAX_CHUNK]);
+        assert_eq!(pieces.len(), 4);
+        assert!(pieces[0].len() > MAX_CHUNK - CUT_WINDOW && pieces[0].len() <= MAX_CHUNK, "{pieces:?}");
     }
 
     #[test]

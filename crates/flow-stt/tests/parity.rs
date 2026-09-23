@@ -225,6 +225,36 @@ fn cpu_matches_python_golden() {
     }
 }
 
+/// A take longer than the encoder is given at once (60 s) is recognised in
+/// pieces cut at a pause, and reads like its parts recognised on their own.
+#[test]
+fn long_audio_is_recognised_in_pieces() {
+    let Some(golden) = setup(Precision::Int8) else { return };
+    let (long, rate) = read_wav(&fixtures_dir().join("long-60s.wav"));
+    let (short, short_rate) = read_wav(&fixtures_dir().join("en-01.wav"));
+    assert_eq!((rate, short_rate), (16_000, 16_000));
+    let mut audio = long;
+    audio.extend(vec![0.0; 16_000]);
+    audio.extend(short);
+
+    let model = Parakeet::new(&golden.model, "cpu");
+    let got = model.transcribe_detailed(&audio, rate).unwrap();
+    let want = format!("{} {}", golden.files["long-60s.wav"].cpu.text, golden.files["en-01.wav"].cpu.text);
+    let edits = edit_distance(&chars(&got.text), &chars(&want));
+    let cer = cer(edits, want.chars().count());
+    println!(
+        "{:.1} s in pieces: CER {:.2}% ({edits} edits) -> {:?}",
+        audio.len() as f64 / 16e3,
+        cer * 100.0,
+        got.text
+    );
+    assert!(cer <= CPU_CER_LIMIT, "CER {:.3}% > {:.1}%", cer * 100.0, CPU_CER_LIMIT * 100.0);
+    assert_eq!(got.tokens.len(), got.frames.len());
+    assert!(got.frames.windows(2).all(|w| w[0] <= w[1]), "frames go back in time: {:?}", got.frames);
+    // en-01 starts 61 s in, at encoder frame 762.
+    assert!(got.frames.last().is_some_and(|&f| f > 762), "{:?}", got.frames.last());
+}
+
 #[test]
 fn features_match_python_preprocessor() {
     let Some(golden) = setup(Precision::Int8) else { return };
@@ -299,7 +329,8 @@ fn gpu_matches_python_golden_within_tolerance() {
 
 /// Switching dictation off gives the GPU back (sessions, and CUDA's
 /// context once nothing else is loaded); switching on loads again and must
-/// recognise exactly as before.
+/// recognise exactly as before. In between, recognising fails rather than
+/// loading the model behind the switch's back.
 #[cfg(any(feature = "cuda", feature = "webgpu"))]
 #[test]
 fn gpu_can_be_switched_off_and_on() {
@@ -313,6 +344,9 @@ fn gpu_can_be_switched_off_and_on() {
         assert!(!model.loaded());
         // False while another test holds a recogniser; freeing is then skipped.
         flow_stt::free_gpu_context();
+        assert!(model.transcribe_detailed(&audio, rate).is_err());
+        assert!(!model.loaded());
+        model.load().unwrap();
         let again = model.transcribe_detailed(&audio, rate).unwrap();
         assert_eq!(again.tokens, first.tokens, "{name}");
     }

@@ -41,9 +41,10 @@ const RESERVE_SECONDS: usize = 60;
 /// The largest cpal callback the mono scratch is pre-sized for.
 const SCRATCH_FRAMES: usize = 8192;
 
-/// Sample decoding for the formats we ask cpal for. Written out rather than
-/// borrowed from `dasp` so the scaling is explicit and testable: full scale
-/// integer maps to `-1.0..1.0`.
+/// Sample decoding for every PCM format cpal delivers. Written out rather
+/// than borrowed from `dasp` so the scaling is explicit and testable: full
+/// scale integer maps to `-1.0..1.0`, and unsigned formats are offset binary,
+/// silent at the middle of their range.
 pub trait ToF32: Copy {
     fn to_f32(self) -> f32;
 }
@@ -52,6 +53,13 @@ impl ToF32 for f32 {
     #[inline]
     fn to_f32(self) -> f32 {
         self
+    }
+}
+
+impl ToF32 for f64 {
+    #[inline]
+    fn to_f32(self) -> f32 {
+        self as f32
     }
 }
 
@@ -66,7 +74,39 @@ macro_rules! full_scale_to_f32 {
     )*};
 }
 
-full_scale_to_f32!(i16, i32);
+full_scale_to_f32!(i8, i16, i32, i64);
+
+macro_rules! offset_binary_to_f32 {
+    ($($uint:ty),*) => {$(
+        impl ToF32 for $uint {
+            #[inline]
+            fn to_f32(self) -> f32 {
+                let mid = (<$uint>::MAX as f64 + 1.0) / 2.0;
+                ((self as f64 - mid) / mid) as f32
+            }
+        }
+    )*};
+}
+
+offset_binary_to_f32!(u8, u16, u32, u64);
+
+/// 24-bit samples, which USB interfaces opened as `hw:` devices often
+/// deliver, arrive in 32-bit containers holding `-2^23..2^23`.
+const I24_FULL_SCALE: f64 = 8_388_608.0;
+
+impl ToF32 for cpal::I24 {
+    #[inline]
+    fn to_f32(self) -> f32 {
+        (self.inner() as f64 / I24_FULL_SCALE) as f32
+    }
+}
+
+impl ToF32 for cpal::U24 {
+    #[inline]
+    fn to_f32(self) -> f32 {
+        ((self.inner() as f64 - I24_FULL_SCALE) / I24_FULL_SCALE) as f32
+    }
+}
 
 /// Re-frames an arbitrary stream of samples into fixed blocks.
 ///
@@ -409,6 +449,28 @@ mod tests {
         assert_eq!(i32::MIN.to_f32(), -1.0);
         assert_eq!((1i32 << 30).to_f32(), 0.5);
         assert!((i32::MAX.to_f32() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn every_other_pcm_format_scales_to_unit_range() {
+        let i24 = |v| cpal::I24::new(v).unwrap();
+        let u24 = |v| cpal::U24::new(v).unwrap();
+        let cases: [(f32, f32, f32); 9] = [
+            (i8::MIN.to_f32(), 0i8.to_f32(), 64i8.to_f32()),
+            (i64::MIN.to_f32(), 0i64.to_f32(), (1i64 << 62).to_f32()),
+            (i24(-8_388_608).to_f32(), i24(0).to_f32(), i24(4_194_304).to_f32()),
+            (0u8.to_f32(), 128u8.to_f32(), 192u8.to_f32()),
+            (0u16.to_f32(), 32_768u16.to_f32(), 49_152u16.to_f32()),
+            (u24(0).to_f32(), u24(8_388_608).to_f32(), u24(12_582_912).to_f32()),
+            (0u32.to_f32(), (1u32 << 31).to_f32(), (3u32 << 30).to_f32()),
+            (0u64.to_f32(), (1u64 << 63).to_f32(), (3u64 << 62).to_f32()),
+            ((-1.0f64).to_f32(), 0.0f64.to_f32(), 0.5f64.to_f32()),
+        ];
+        for (i, (min, zero, half)) in cases.into_iter().enumerate() {
+            assert_eq!((min, zero, half), (-1.0, 0.0, 0.5), "case {i}");
+        }
+        assert!((i24(8_388_607).to_f32() - 1.0).abs() < 1e-6);
+        assert!((u8::MAX.to_f32() - 1.0).abs() < 1e-2);
     }
 
     #[test]

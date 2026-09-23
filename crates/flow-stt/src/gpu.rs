@@ -459,6 +459,45 @@ impl Adapter {
     }
 }
 
+// -- loading libraries -------------------------------------------------------------
+
+/// A library that comes with the OS or the graphics driver, by name. On
+/// Windows only System32 is searched: a DLL of the same name in the current
+/// folder or on `PATH` must not stand in for it.
+fn open_system(name: &str) -> Result<Library, libloading::Error> {
+    // SAFETY: the loaders and driver libraries opened this way (NVML, Vulkan)
+    // only set up their own state when loaded.
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{Library as Windows, LOAD_LIBRARY_SEARCH_SYSTEM32};
+        unsafe { Windows::load_with_flags(name, LOAD_LIBRARY_SEARCH_SYSTEM32) }.map(Library::from)
+    }
+    #[cfg(not(windows))]
+    unsafe {
+        Library::new(name)
+    }
+}
+
+/// A library by full path. On Windows its own folder is searched for the
+/// DLLs it depends on, which plain `LoadLibrary` does not do, and then only
+/// the program's folder and System32.
+fn open_path(path: &Path) -> Result<Library, libloading::Error> {
+    // SAFETY: as for `open_system`; also CUDA's libraries, whose
+    // initialisers likewise only set up their own state.
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{
+            Library as Windows, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        };
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+        unsafe { Windows::load_with_flags(path, flags) }.map(Library::from)
+    }
+    #[cfg(not(windows))]
+    unsafe {
+        Library::new(path)
+    }
+}
+
 // -- ONNX Runtime's provider libraries -------------------------------------------
 
 #[cfg(windows)]
@@ -583,18 +622,14 @@ mod nvml {
     }
 
     fn library() -> Option<Library> {
-        let mut names: Vec<std::path::PathBuf> = Vec::new();
         if cfg!(windows) {
-            names.push("nvml.dll".into());
-            // Drivers before R418 kept it here rather than in System32.
-            if let Some(pf) = std::env::var_os("ProgramW6432") {
-                names.push(std::path::Path::new(&pf).join(r"NVIDIA Corporation\NVSMI\nvml.dll"));
-            }
+            // Drivers before R418 kept it in NVSMI rather than in System32.
+            let nvsmi = std::env::var_os("ProgramW6432")
+                .map(|pf| std::path::Path::new(&pf).join(r"NVIDIA Corporation\NVSMI\nvml.dll"));
+            super::open_system("nvml.dll").ok().or_else(|| super::open_path(&nvsmi?).ok())
         } else {
-            names.extend(["libnvidia-ml.so.1".into(), "libnvidia-ml.so".into()]);
+            ["libnvidia-ml.so.1", "libnvidia-ml.so"].into_iter().find_map(|n| super::open_system(n).ok())
         }
-        // SAFETY: NVML's initialisers only set up its own state.
-        names.iter().find_map(|n| unsafe { Library::new(n) }.ok())
     }
 
     /// `Err(None)`: no NVIDIA driver at all. `Err(Some(_))`: installed but
@@ -883,8 +918,7 @@ mod vulkan {
 
     /// Every adapter, software ones included; `Err` says why there are none.
     pub fn adapters() -> Result<Vec<Adapter>, String> {
-        // SAFETY: the Vulkan loader's initialisers only set up its own state.
-        let lib = unsafe { Library::new(LOADER) }
+        let lib = super::open_system(LOADER)
             .map_err(|_| format!("the Vulkan loader ({LOADER}) is not installed"))?;
         // SAFETY: the signatures are Vulkan 1.0's.
         let result = unsafe { enumerate(&lib) };
@@ -1106,17 +1140,27 @@ mod cuda_libs {
     /// Loaded libraries stay loaded: the provider needs them later.
     static KEPT: Mutex<Vec<Library>> = Mutex::new(Vec::new());
 
-    fn open(path: &OsStr) -> Option<Library> {
+    /// Load a CUDA library by full path or bare name. Failures are logged:
+    /// a library that is there but will not load (a missing dependency, the
+    /// wrong architecture) otherwise just reads as "not installed".
+    fn open(path: &Path) -> Option<Library> {
         // SAFETY: the CUDA libraries' initialisers only set up their own state.
         #[cfg(unix)]
-        {
+        let opened = {
             use libloading::os::unix::{Library as Unix, RTLD_GLOBAL, RTLD_LAZY};
-            unsafe { Unix::open(Some(path), RTLD_LAZY | RTLD_GLOBAL) }.ok().map(Library::from)
-        }
-        #[cfg(not(unix))]
-        {
-            unsafe { Library::new(path) }.ok()
-        }
+            unsafe { Unix::open(Some(path), RTLD_LAZY | RTLD_GLOBAL) }.map(Library::from)
+        };
+        // A bare name only from the program's folder and System32, never the
+        // current folder or `PATH`, where any DLL of that name would do; the
+        // CUDA and cuDNN folders are then tried by full path.
+        #[cfg(windows)]
+        let opened = if path.is_absolute() {
+            super::open_path(path)
+        } else {
+            use libloading::os::windows::{Library as Windows, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS};
+            unsafe { Windows::load_with_flags(path, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) }.map(Library::from)
+        };
+        opened.inspect_err(|e| log::debug!("could not load {}: {e}", path.display())).ok()
     }
 
     /// Load everything the provider needs. Returns the names of what is
@@ -1128,7 +1172,7 @@ mod cuda_libs {
         let mut kept = Vec::new();
         for need in NEEDED {
             let name = if cfg!(windows) { need.windows } else { need.linux };
-            if let Some(lib) = open(OsStr::new(name)) {
+            if let Some(lib) = open(Path::new(name)) {
                 kept.push(lib);
                 continue;
             }
@@ -1136,7 +1180,7 @@ mod cuda_libs {
                 .iter()
                 .map(|d| d.join(name))
                 .filter(|p| p.is_file())
-                .find_map(|p| open(p.as_os_str()).map(|l| (l, p)));
+                .find_map(|p| open(&p).map(|l| (l, p)));
             match found {
                 Some((lib, path)) => {
                     log::debug!("loaded {}", path.display());
@@ -1155,17 +1199,30 @@ mod cuda_libs {
         (missing, loaded)
     }
 
+    /// cuDNN 9's sub-libraries beside `dir`'s `cudnn64_9.dll`, the ones the
+    /// others depend on (graph, then ops) first.
     fn siblings(dir: Option<&Path>) -> Vec<Library> {
         let Some(Ok(entries)) = dir.map(std::fs::read_dir) else { return Vec::new() };
-        entries
+        let mut paths: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
                 let name = p.file_name().and_then(OsStr::to_str).unwrap_or("");
                 name.starts_with("cudnn_") && name.ends_with("64_9.dll")
             })
-            .filter_map(|p| open(p.as_os_str()))
-            .collect()
+            .collect();
+        paths.sort_by_key(|p| {
+            let name = p.file_name().and_then(OsStr::to_str).unwrap_or("").to_string();
+            let rank = if name.starts_with("cudnn_graph") {
+                0
+            } else if name.starts_with("cudnn_ops") {
+                1
+            } else {
+                2
+            };
+            (rank, name)
+        });
+        paths.iter().filter_map(|p| open(p)).collect()
     }
 
     /// Destroy the CUDA context: the last ~400 MB of video memory, which
@@ -1282,7 +1339,10 @@ mod cuda_libs {
                 dirs.extend(wheels.iter().map(|w| site.join("nvidia").join(w).join("lib")));
             }
         }
-        dirs.retain(|d| d.is_dir());
+        // Full paths: Windows searches a DLL's own folder for its
+        // dependencies only when it was loaded by one.
+        let mut dirs: Vec<PathBuf> =
+            dirs.into_iter().filter(|d| d.is_dir()).filter_map(|d| std::path::absolute(d).ok()).collect();
         dirs.dedup();
         dirs
     }
