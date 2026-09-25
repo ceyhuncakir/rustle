@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that the shortcut registers and that its signals reach the daemon.
 
-Run inside scripts/nested-shell.sh with FLOW_DEV=1.
+Run inside scripts/nested-shell.sh with RUSTLE_DEV=1.
 """
 
 from __future__ import annotations

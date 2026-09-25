@@ -4,9 +4,9 @@
 use clap::Parser;
 
 fn main() {
-    let cli = flow_lib::cli::Cli::parse();
+    let cli = rustle_lib::cli::Cli::parse();
 
-    // A release build on Windows has no console of its own, so `flow doctor`
+    // A release build on Windows has no console of its own, so `rustle doctor`
     // typed in a terminal would print nothing. Borrow the terminal's.
     #[cfg(windows)]
     if cli.command.is_some() || cli.headless {
@@ -21,15 +21,20 @@ fn main() {
     .format_timestamp_secs()
     .init();
 
+    // Once, on a machine where the app was installed under its old name.
+    for note in rustle_core::config::migrate_from_flow() {
+        log::info!("{note}");
+    }
+
     if let Some(command) = cli.command {
-        std::process::exit(flow_lib::cli::run(command));
+        std::process::exit(rustle_lib::cli::run(command));
     }
 
     if cli.headless {
-        std::process::exit(flow_lib::run_headless());
+        std::process::exit(rustle_lib::run_headless());
     }
 
-    flow_lib::run();
+    rustle_lib::run();
 }
 
 #[cfg(windows)]

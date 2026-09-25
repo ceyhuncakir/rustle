@@ -1,4 +1,4 @@
-//! The Flow desktop app: assembles the engine from the crates and puts a
+//! The Rustle desktop app: assembles the engine from the crates and puts a
 //! tray icon, an overlay window and a settings window around it.
 
 pub mod cli;
@@ -102,14 +102,14 @@ pub fn run() {
                 // Start dictating straight away; that is what the app is for.
                 if let Err(err) = host::start(&shared, Some(&handle)) {
                     error!("could not start the engine: {err:#}");
-                    windows::notify(&handle, "Flow could not start", &format!("{err:#}"));
+                    windows::notify(&handle, "Rustle could not start", &format!("{err:#}"));
                     windows::open_settings(&handle);
                 }
             }
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building the Flow app")
+        .expect("error while building the Rustle app")
         .run(|app, event| match event {
             // Closing the last window must not quit a tray app.
             tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
@@ -129,17 +129,17 @@ pub fn run() {
 
 /// Run the engine without any windows: the systemd path on GNOME, where the
 /// Shell extension owns every pixel. Blocks until the engine stops, which a
-/// signal asks it to do (`systemctl --user stop flow`, Ctrl-C).
+/// signal asks it to do (`systemctl --user stop rustle`, Ctrl-C).
 pub fn run_headless() -> i32 {
     let shared = Shared::load();
-    // At login Flow can be quicker than the Shell; without the extension
+    // At login Rustle can be quicker than the Shell; without the extension
     // there is no shortcut. Failing lets systemd try again shortly.
     #[cfg(target_os = "linux")]
     if gnome_without_extension() {
-        info!("waiting for Flow's GNOME Shell extension");
-        if !flow_desktop::linux::gnome::wait_for_extension(std::time::Duration::from_secs(30)) {
+        info!("waiting for Rustle's GNOME Shell extension");
+        if !rustle_desktop::linux::gnome::wait_for_extension(std::time::Duration::from_secs(30)) {
             error!(
-                "Flow's GNOME Shell extension is not running. Enable it with `gnome-extensions enable {}` and log out and back in.",
+                "Rustle's GNOME Shell extension is not running. Enable it with `gnome-extensions enable {}` and log out and back in.",
                 gnome_extension::UUID
             );
             return 1;
@@ -158,7 +158,7 @@ pub fn run_headless() -> i32 {
     };
     let tx = running.tx.clone();
     host::on_termination(move || {
-        let _ = tx.send(flow_core::engine::Event::Shutdown);
+        let _ = tx.send(rustle_core::engine::Event::Shutdown);
     });
     // The engine unloads the cleanup model on its way out; then the GPU.
     let _ = running.thread.join();
@@ -170,9 +170,9 @@ pub fn run_headless() -> i32 {
     0
 }
 
-/// A GNOME session whose Shell does not (yet) run Flow's extension.
+/// A GNOME session whose Shell does not (yet) run Rustle's extension.
 #[cfg(target_os = "linux")]
 fn gnome_without_extension() -> bool {
     let gnome = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_ascii_lowercase().contains("gnome"));
-    gnome && !flow_desktop::linux::gnome::extension_present()
+    gnome && !rustle_desktop::linux::gnome::extension_present()
 }

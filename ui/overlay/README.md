@@ -2,13 +2,13 @@
 
 The floating island that shows what dictation is doing: a port of the GNOME
 Shell version in `extension/` onto one `<div>` and one `<canvas>`, for the
-platforms where Flow draws its own always-on-top window.
+platforms where Rustle draws its own always-on-top window.
 
 `island.ts` owns the states, sizes and animations; `../shared/visualizer.ts`
 paints the bars, dots, check and cross; `../shared/theme.ts` holds every
 colour, width and duration, copied from `extension/theme.js`. The command and
 event contract with the native side is in `../shared/api.ts` (`overlay_ready`,
-`overlay_resize`, `flow:state`, `flow:text`, `flow:level`). `overlay_resize`
+`overlay_resize`, `rustle:state`, `rustle:text`, `rustle:level`). `overlay_resize`
 reports the pill's own box, border included; the page centres the pill, so any
 margin the native side adds for the shadow (30 px to each side, 40 px below)
 stays symmetric.

@@ -17,27 +17,27 @@
 # the command would connect to the real compositor and show up on your desktop.
 set -euo pipefail
 
-FLOW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FLOW_UUID="flow@ceyhun.dev"
-FLOW_LOG="${FLOW_LOG:-/tmp/flow-nested.log}"
-FLOW_SOCKET="${FLOW_SOCKET:-flow-nested}"
-FLOW_MONITOR="${FLOW_MONITOR:-1600x900}"
+RUSTLE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUSTLE_UUID="rustle@ceyhun.dev"
+RUSTLE_LOG="${RUSTLE_LOG:-/tmp/rustle-nested.log}"
+RUSTLE_SOCKET="${RUSTLE_SOCKET:-rustle-nested}"
+RUSTLE_MONITOR="${RUSTLE_MONITOR:-1600x900}"
 
 # Read by the extension's _enableDevMode; needs no second extension and writes
 # nothing to the dconf key the real session shares.
-export FLOW_DEV="${FLOW_DEV:-0}"
-export FLOW_ROOT FLOW_UUID FLOW_LOG FLOW_SOCKET FLOW_MONITOR
+export RUSTLE_DEV="${RUSTLE_DEV:-0}"
+export RUSTLE_ROOT RUSTLE_UUID RUSTLE_LOG RUSTLE_SOCKET RUSTLE_MONITOR
 
-"$FLOW_ROOT/scripts/install.sh" >/dev/null
+"$RUSTLE_ROOT/scripts/install.sh" >/dev/null
 
 if [ "$#" -gt 0 ]; then
-    export FLOW_SHELL_ARGS="--headless --virtual-monitor $FLOW_MONITOR"
+    export RUSTLE_SHELL_ARGS="--headless --virtual-monitor $RUSTLE_MONITOR"
 else
-    export FLOW_SHELL_ARGS="--nested"
-    export MUTTER_DEBUG_DUMMY_MODE_SPECS="$FLOW_MONITOR"
+    export RUSTLE_SHELL_ARGS="--nested"
+    export MUTTER_DEBUG_DUMMY_MODE_SPECS="$RUSTLE_MONITOR"
 fi
 
-echo "shell log: $FLOW_LOG"
+echo "shell log: $RUSTLE_LOG"
 
 # The inner script expands its variables itself, in the child session.
 # shellcheck disable=SC2016
@@ -45,8 +45,8 @@ exec dbus-run-session -- bash -c '
     set -u
 
     # shellcheck disable=SC2086
-    gnome-shell --wayland --wayland-display "$FLOW_SOCKET" $FLOW_SHELL_ARGS \
-        >"$FLOW_LOG" 2>&1 &
+    gnome-shell --wayland --wayland-display "$RUSTLE_SOCKET" $RUSTLE_SHELL_ARGS \
+        >"$RUSTLE_LOG" 2>&1 &
     shell_pid=$!
 
     # Wait for the Shell to own its bus name before poking at it.
@@ -56,13 +56,13 @@ exec dbus-run-session -- bash -c '
         sleep 0.25
     done
 
-    gnome-extensions enable "$FLOW_UUID" >/dev/null 2>&1 || true
+    gnome-extensions enable "$RUSTLE_UUID" >/dev/null 2>&1 || true
     sleep 2
 
     status=0
     if [ "$#" -gt 0 ]; then
         # Point clients at the child compositor, not the real one.
-        export WAYLAND_DISPLAY="$FLOW_SOCKET"
+        export WAYLAND_DISPLAY="$RUSTLE_SOCKET"
         unset DISPLAY
         "$@" || status=$?
         kill "$shell_pid" 2>/dev/null || true

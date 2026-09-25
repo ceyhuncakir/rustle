@@ -13,15 +13,15 @@ island.onResize = (width, height) => {
 
 async function main(): Promise<void> {
   // Subscribe before announcing readiness so nothing emitted in between is lost.
-  await on("flow:state", ({ state }) => {
+  await on("rustle:state", ({ state }) => {
     if ((STATES as readonly string[]).includes(state)) {
       island.setState(state as IslandState);
     } else {
       console.warn("overlay: ignoring unknown state", state);
     }
   });
-  await on("flow:text", ({ text }) => island.setText(text));
-  await on("flow:level", ({ level }) => island.pushLevel(level));
+  await on("rustle:text", ({ text }) => island.setText(text));
+  await on("rustle:level", ({ level }) => island.pushLevel(level));
 
   await api.overlayReady().catch((err) => console.warn("overlay_ready failed", err));
 }

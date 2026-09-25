@@ -1,9 +1,9 @@
 {
-  "name": "flow-ui",
+  "name": "rustle-ui",
   "private": true,
   "version": "0.3.0",
   "type": "module",
-  "description": "Web frontend for the Flow dictation app: overlay pill, settings window and first-run wizard.",
+  "description": "Web frontend for the Rustle dictation app: overlay pill, settings window and first-run wizard.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

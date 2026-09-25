@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the speech-recognition parity fixtures for crates/flow-stt.
+"""Generate the speech-recognition parity fixtures for crates/rustle-stt.
 
 Run from the repository root with the project venv:
 
@@ -9,13 +9,13 @@ It synthesises tests/fixtures/stt/*.wav with espeak-ng (English and Dutch
 sentences, silence, a very short clip, a 60 s concatenation, a clipped
 sentence and one rendered at 48 kHz), then records what onnx-asr 0.12
 produces for each - token ids, encoder frame indices and text - using the
-exact graphs the Rust crate runs: the model files in flow's data dir
+exact graphs the Rust crate runs: the model files in Rustle's data dir
 (int8 encoder + int8 decoder_joint on the CPU; fp32 on CUDA when available)
 with the packaged `nemo128.onnx` preprocessor on the CPU. The features for
 one short file are stored too, so the Rust preprocessor session can be
 checked numerically.
 
-Requires the model in flow's data dir: `import_from_hf_cache` plus a
+Requires the model in Rustle's data dir: `import_from_hf_cache` plus a
 `download(..., Precision::Int8)` from the Rust side, or the equivalent.
 
 Run it with an onnxruntime of the same minor version as the one the `ort`
@@ -42,7 +42,7 @@ differences into the odd token. To run the strict check on the wheel's
 runtime:
 
     ORT_DYLIB_PATH=/tmp/ort124/lib/python3.13/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4 \
-        cargo test -p flow-stt --features ort/load-dynamic --test parity
+        cargo test -p rustle-stt --features ort/load-dynamic --test parity
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ sys.path.insert(0, str(ROOT))
 FIXTURES = ROOT / "tests" / "fixtures" / "stt"
 MODEL_ID = "nemo-parakeet-tdt-0.6b-v3"
 NEMO128_SHA256 = "5b4a84c52eeaa615dc46d781cc7e4598f9b432184831d57493c48adcd01371a9"
-# The onnxruntime minor the `ort` crate pinned in crates/flow-stt/Cargo.toml links.
+# The onnxruntime minor the `ort` crate pinned in crates/rustle-stt/Cargo.toml links.
 ORT_MINOR = "1.24"
 SAMPLE_RATE = 16_000
 
@@ -96,10 +96,10 @@ NL = [
 
 
 def data_dir() -> Path:
-    if env := os.environ.get("FLOW_DATA_DIR"):
+    if env := os.environ.get("RUSTLE_DATA_DIR"):
         return Path(env)
     base = os.environ.get("XDG_DATA_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "share") / "flow"
+    return (Path(base) if base else Path.home() / ".local" / "share") / "rustle"
 
 
 MODEL_DIR = data_dir() / "models" / MODEL_ID
@@ -198,7 +198,7 @@ def sha256(path: Path) -> str:
 
 
 def model_view() -> Path:
-    """A directory onnx-asr can load: flow's model files plus the config.json
+    """A directory onnx-asr can load: Rustle's model files plus the config.json
     it needs to pick the 128-mel preprocessor."""
     missing = [f for f in ("vocab.txt", "nemo128.onnx", "encoder-model.int8.onnx", "decoder_joint-model.int8.onnx")
                if not (MODEL_DIR / f).is_file()]
@@ -207,7 +207,7 @@ def model_view() -> Path:
     actual = sha256(MODEL_DIR / "nemo128.onnx")
     if actual != NEMO128_SHA256:
         sys.exit(f"{MODEL_DIR / 'nemo128.onnx'} has sha256 {actual}, expected {NEMO128_SHA256}")
-    view = Path(tempfile.mkdtemp(prefix="flow-stt-golden-"))
+    view = Path(tempfile.mkdtemp(prefix="rustle-stt-golden-"))
     for f in MODEL_DIR.iterdir():
         if f.is_file():
             os.symlink(f, view / f.name)
@@ -258,7 +258,7 @@ def run(model, audio: np.ndarray, rate: int) -> dict:
 
 
 def mean_of_three(audio48: np.ndarray) -> np.ndarray:
-    """flow_core::dsp::resample for a 3:1 ratio, operation for operation."""
+    """rustle_core::dsp::resample for a 3:1 ratio, operation for operation."""
     n = len(audio48) // 3 * 3
     y = audio48[:n].reshape(-1, 3)
     return (((y[:, 0] + y[:, 1]) + y[:, 2]) / np.float32(3.0)).astype(np.float32)
@@ -339,7 +339,7 @@ def main() -> None:
             if cuda is not None:
                 entry["cuda"] = timed(cuda, audio, rate, f"{path.name} cuda")
         else:
-            # The Rust side resamples with flow_core::dsp before recognising;
+            # The Rust side resamples with rustle_core::dsp before recognising;
             # the golden is defined on the same samples. onnx-asr's own
             # resampler result is kept for reference.
             assert rate == 3 * SAMPLE_RATE, rate

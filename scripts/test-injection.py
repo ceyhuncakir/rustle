@@ -5,7 +5,7 @@ This is the assumption the whole architecture rests on - that the Shell's own
 virtual input device can type into an unrelated Wayland client with no root
 and no access to /dev/uinput.
 
-Run inside scripts/nested-shell.sh with FLOW_DEV=1.
+Run inside scripts/nested-shell.sh with RUSTLE_DEV=1.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ from gi.repository import Gio, GLib  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from flowd.island import IslandClient, IslandUnavailable  # noqa: E402
 
-OUT = Path(os.environ.get("FLOW_SHOTS", "/tmp/flow-shots"))
-SENTINEL = "Flow injected this line with no root and no uinput."
+OUT = Path(os.environ.get("RUSTLE_SHOTS", "/tmp/rustle-shots"))
+SENTINEL = "Rustle injected this line with no root and no uinput."
 
 
 class Shell:
-    """Eval is only reachable because FLOW_DEV=1 turned on unsafe mode."""
+    """Eval is only reachable because RUSTLE_DEV=1 turned on unsafe mode."""
 
     def __init__(self) -> None:
         self._bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)

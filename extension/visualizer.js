@@ -25,7 +25,7 @@ export const Visualizer = GObject.registerClass(
 class Visualizer extends St.DrawingArea {
     _init(params = {}) {
         super._init({
-            style_class: 'flow-visualizer',
+            style_class: 'rustle-visualizer',
             x_expand: true,
             y_expand: true,
             ...params,

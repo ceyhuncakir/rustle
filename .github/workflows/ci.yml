@@ -36,7 +36,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy (WebGPU build, what the installers ship)
-        run: cargo clippy --workspace --all-targets --features flow/webgpu,flow-stt/webgpu -- -D warnings
+        run: cargo clippy --workspace --all-targets --features rustle/webgpu,rustle-stt/webgpu -- -D warnings
       - name: Test
         run: cargo test --workspace
 

@@ -100,7 +100,7 @@ function Wizard() {
       if (!s.running) await api.setRunning(true);
       else if (s.needs_restart) await api.restartEngine();
     } catch (err) {
-      toast(`Could not start Flow: ${describe(err)}`);
+      toast(`Could not start Rustle: ${describe(err)}`);
     } finally {
       engineBusy.current = false;
       setStarting(false);
@@ -171,7 +171,7 @@ function Wizard() {
               </Button>
               {last ? (
                 <Button variant="suggested" busy={finishing} onClick={() => void finish()}>
-                  Start using Flow
+                  Start using Rustle
                 </Button>
               ) : (
                 <Button variant="suggested" onClick={() => setIndex((i) => Math.min(STEPS.length - 1, i + 1))}>
@@ -191,7 +191,7 @@ function Rail({ steps, index, onJump }: { steps: Step[]; index: number; onJump: 
     <nav aria-label="Setup steps" className="hidden w-[200px] shrink-0 flex-col border-r border-line bg-surface px-5 pt-10 sm:flex">
       <div className="mb-6 flex items-center gap-2 px-1">
         <Mark />
-        <span className="text-[15px] font-semibold">Flow</span>
+        <span className="text-[15px] font-semibold">Rustle</span>
       </div>
       <ol className="relative flex flex-col">
         {steps.map((s, i) => {

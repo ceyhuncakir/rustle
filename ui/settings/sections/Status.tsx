@@ -16,7 +16,7 @@ export function StatusSection() {
 
   const toggle = async (on: boolean) => {
     setSwitching(on);
-    toast(on ? "Starting Flow…" : "Flow stopped");
+    toast(on ? "Starting Rustle…" : "Rustle stopped");
     try {
       await api.setRunning(on);
       await refreshStatus();

@@ -18,13 +18,13 @@ export function PreferencesStep() {
         >
           <Switch id="learning" checked={config.learning.enabled} onChange={(on) => detach(save("learning", "enabled", on))} />
         </Row>
-        <Row title="Launch at login" htmlFor="autostart" subtitle="Start Flow in the background when you sign in, so the shortcut always works.">
+        <Row title="Launch at login" htmlFor="autostart" subtitle="Start Rustle in the background when you sign in, so the shortcut always works.">
           <AutostartSwitch id="autostart" />
         </Row>
       </Group>
       <p className="mt-5 max-w-[52ch] text-[13.5px] text-fg-2">
-        While it runs, Flow keeps a small icon in the tray. Use it to pause dictation, open Settings or quit; closing this window does
-        not stop Flow.
+        While it runs, Rustle keeps a small icon in the tray. Use it to pause dictation, open Settings or quit; closing this window does
+        not stop Rustle.
       </p>
     </div>
   );

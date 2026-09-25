@@ -1,18 +1,18 @@
-//! `flow <subcommand>`: the diagnostic and headless surface, no windows.
+//! `rustle <subcommand>`: the diagnostic and headless surface, no windows.
 
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use flow_core::config::{self, Config};
-use flow_core::history::History;
-use flow_core::learning::{self, Learner};
-use flow_core::models::{self, Precision};
+use rustle_core::config::{self, Config};
+use rustle_core::history::History;
+use rustle_core::learning::{self, Learner};
+use rustle_core::models::{self, Precision};
 
 use crate::host::Shared;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "flow",
+    name = "rustle",
     version,
     about = "Local offline dictation: speak, and cleaned-up text lands in the focused app."
 )]
@@ -38,7 +38,7 @@ pub enum Command {
         #[arg(short, long, default_value_t = 5.0)]
         seconds: f32,
     },
-    /// Drive the running Flow from a key binding, for desktops that hand
+    /// Drive the running Rustle from a key binding, for desktops that hand
     /// out no global shortcuts (sway, river, niri): `down` on press and `up`
     /// on release hold to talk, `toggle` starts or stops, `cancel` drops the
     /// take.
@@ -84,7 +84,7 @@ pub enum Command {
         #[command(subcommand)]
         action: ModelsAction,
     },
-    /// Started by Flow itself: unload the Ollama model if Flow dies.
+    /// Started by Rustle itself: unload the Ollama model if Rustle dies.
     #[command(hide = true)]
     WatchOllama {
         #[arg(long)]
@@ -149,13 +149,13 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Doctor => doctor(&config),
         Command::Dictate { seconds } => dictate(seconds),
         Command::Context => {
-            let backends = flow_desktop::build(&config.desktop)?;
+            let backends = rustle_desktop::build(&config.desktop)?;
             let ctx = backends.focus.context()?;
             println!("   app: {}\n title: {}\n  role: {}", ctx.app, ctx.title, ctx.role);
             Ok(())
         }
         Command::Devices => {
-            for d in flow_audio::list_devices() {
+            for d in rustle_audio::list_devices() {
                 println!(
                     "{}{} ({} ch, {} Hz)",
                     if d.is_default { "* " } else { "  " },
@@ -186,7 +186,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Learning { action } => match action.as_str() {
             "on" | "off" => {
                 config::set_value("learning", "enabled", action == "on")?;
-                println!("learning {action}; restart Flow to apply");
+                println!("learning {action}; restart Rustle to apply");
                 Ok(())
             }
             _ => {
@@ -234,14 +234,14 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         }
         Command::Learn => {
             if !config.learning.enabled {
-                anyhow::bail!("learning is off; `flow learning on` first");
+                anyhow::bail!("learning is off; `rustle learning on` first");
             }
             let history = History::open_default()?;
             if history.count()? == 0 {
                 anyhow::bail!("nothing stored yet");
             }
-            let backend: Arc<dyn flow_core::backends::Backend> =
-                Arc::from(flow_core::backends::build_backend(&config.cleanup));
+            let backend: Arc<dyn rustle_core::backends::Backend> =
+                Arc::from(rustle_core::backends::build_backend(&config.cleanup));
             let (terms, style) = Learner::new(backend).refresh(&history, config.learning.max_terms)?;
             println!("learned {} terms; style: {}", terms.len(), if style.is_empty() { "-" } else { &style });
             Ok(())
@@ -271,11 +271,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 let precision = match precision.as_deref() {
                     Some("fp32") => Precision::Fp32,
                     Some("int8") => Precision::Int8,
-                    _ => flow_stt::gpu::precision_for(&config.stt.provider),
+                    _ => rustle_stt::gpu::precision_for(&config.stt.provider),
                 };
                 let mut last = String::new();
                 let cancel = std::sync::atomic::AtomicBool::new(false);
-                flow_stt::download(&config.stt.model, precision, &cancel, |p: flow_stt::Progress| {
+                rustle_stt::download(&config.stt.model, precision, &cancel, |p: rustle_stt::Progress| {
                     if p.file != last {
                         last = p.file.clone();
                         eprintln!("{}", p.file);
@@ -288,7 +288,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 Ok(())
             }
             ModelsAction::ImportHf => {
-                flow_stt::import_from_hf_cache(&config.stt.model)?;
+                rustle_stt::import_from_hf_cache(&config.stt.model)?;
                 println!("imported into {}", models::model_dir(&config.stt.model).display());
                 Ok(())
             }
@@ -309,16 +309,16 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
     }
 }
 
-/// One line to the running Flow's control socket.
+/// One line to the running Rustle's control socket.
 fn hotkey(action: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        flow_desktop::linux::control::send(action).map_err(|e| e.to_string())
+        rustle_desktop::linux::control::send(action).map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = action;
-        Err("`flow hotkey` is for Linux desktops; set the shortcut in Flow's settings instead".into())
+        Err("`rustle hotkey` is for Linux desktops; set the shortcut in Rustle's settings instead".into())
     }
 }
 
@@ -331,7 +331,7 @@ fn short(s: &str, n: usize) -> String {
 }
 
 fn gpu(config: &Config) {
-    let report = flow_stt::gpu::detect();
+    let report = rustle_stt::gpu::detect();
     if report.devices.is_empty() {
         println!("no graphics card found");
     }
@@ -374,7 +374,7 @@ fn gpu(config: &Config) {
             println!("to fix: {fix}");
         }
     }
-    let precision = flow_stt::gpu::precision_for(&config.stt.provider);
+    let precision = rustle_stt::gpu::precision_for(&config.stt.provider);
     println!(
         "provider = {} loads the {} model ({})",
         config.stt.provider,
@@ -401,9 +401,9 @@ fn doctor(config: &Config) -> anyhow::Result<()> {
 fn dictate(seconds: f32) -> anyhow::Result<()> {
     let shared = Shared::load();
     let config = shared.config();
-    let backends = flow_desktop::build(&config.desktop)?;
-    let overlay: Arc<dyn flow_core::engine::Overlay> = match backends.overlay {
-        flow_desktop::OverlayChoice::Native(island) => island,
+    let backends = rustle_desktop::build(&config.desktop)?;
+    let overlay: Arc<dyn rustle_core::engine::Overlay> = match backends.overlay {
+        rustle_desktop::OverlayChoice::Native(island) => island,
         _ => Arc::new(crate::host::NullOverlay),
     };
     let (tx, rx) = std::sync::mpsc::channel();

@@ -1,12 +1,12 @@
-//! `flow eval`: run the cleanup pass over tricky transcripts and check what
+//! `rustle eval`: run the cleanup pass over tricky transcripts and check what
 //! it does. The cases live in `eval/cases.toml`, compiled into the binary so
 //! the check works from an installed copy too.
 
 use std::time::Instant;
 
-use flow_core::cleanup::build_cleaner;
-use flow_core::config::Config;
-use flow_core::engine::FocusContext;
+use rustle_core::cleanup::build_cleaner;
+use rustle_core::config::Config;
+use rustle_core::engine::FocusContext;
 use serde::Deserialize;
 
 const CASES_TOML: &str = include_str!("../../eval/cases.toml");
@@ -45,7 +45,7 @@ pub fn run(config: &Config, filter: Option<&str>) -> anyhow::Result<()> {
     let file: File = toml::from_str(CASES_TOML)?;
     let cleaner = build_cleaner(&config.cleanup);
 
-    if std::env::var("FLOW_EVAL_PROFILE").as_deref() == Ok("1") {
+    if std::env::var("RUSTLE_EVAL_PROFILE").as_deref() == Ok("1") {
         cleaner.set_profile(file.profile.terms.clone(), file.profile.style.clone());
         println!("[profile injected]\n");
     }

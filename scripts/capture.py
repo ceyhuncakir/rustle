@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Screenshot every island state. Run inside scripts/nested-shell.sh with FLOW_DEV=1.
+"""Screenshot every island state. Run inside scripts/nested-shell.sh with RUSTLE_DEV=1.
 
 Gives the island-first workflow a real feedback loop: change a colour or a
 curve, re-run, look at the PNGs.
@@ -22,7 +22,7 @@ from gi.repository import Gio, GLib  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from flowd.island import IslandClient, IslandUnavailable  # noqa: E402
 
-OUT = Path(os.environ.get("FLOW_SHOTS", "/tmp/flow-shots"))
+OUT = Path(os.environ.get("RUSTLE_SHOTS", "/tmp/rustle-shots"))
 
 # The nested monitor is 1600x900; the pill sits bottom-centre. Crop to the
 # region it can occupy so the PNGs are readable instead of mostly wallpaper.

@@ -26,7 +26,7 @@ export function AboutSection() {
       <Row title="Configuration file" subtitle={<span className="selectable font-mono text-[12px]">{path.data ?? ""}</span>}>
         <Button onClick={() => void api.openConfigFile().catch((err) => toast(`Could not open: ${describe(err)}`))}>Open</Button>
       </Row>
-      <Row title="Version" subtitle={status?.version ? `Flow ${status.version}` : "…"} />
+      <Row title="Version" subtitle={status?.version ? `Rustle ${status.version}` : "…"} />
       <Row title="Diagnostics" subtitle="Versions, devices and the last errors, for a bug report">
         <Button busy={copy.busy} onClick={() => void copy.start()}>
           Copy diagnostics

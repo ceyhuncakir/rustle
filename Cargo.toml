@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/flow-core",
-    "crates/flow-audio",
-    "crates/flow-stt",
-    "crates/flow-desktop",
+    "crates/rustle-core",
+    "crates/rustle-audio",
+    "crates/rustle-stt",
+    "crates/rustle-desktop",
     "src-tauri",
 ]
 
@@ -12,14 +12,14 @@ members = [
 version = "0.3.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/ceyhuncakir/flow"
+repository = "https://github.com/ceyhuncakir/rustle"
 rust-version = "1.89"
 
 [workspace.dependencies]
-flow-core = { path = "crates/flow-core" }
-flow-audio = { path = "crates/flow-audio" }
-flow-stt = { path = "crates/flow-stt" }
-flow-desktop = { path = "crates/flow-desktop" }
+rustle-core = { path = "crates/rustle-core" }
+rustle-audio = { path = "crates/rustle-audio" }
+rustle-stt = { path = "crates/rustle-stt" }
+rustle-desktop = { path = "crates/rustle-desktop" }
 
 anyhow = "1"
 thiserror = "2"

@@ -1,15 +1,15 @@
-//! The dictation shortcut on Linux desktops without Flow's GNOME extension:
+//! The dictation shortcut on Linux desktops without Rustle's GNOME extension:
 //! the desktop portal's global shortcuts where it has them, else the
 //! control socket that the compositor's own key bindings reach through
-//! `flow hotkey`. What the wizard and the settings window say about it,
+//! `rustle hotkey`. What the wizard and the settings window say about it,
 //! and the Grant button behind the "hotkey-wayland" row.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use flow_desktop::linux::portal::{self, PortalState};
-use flow_desktop::linux::{binding_help, control};
-use flow_desktop::Session;
+use rustle_desktop::linux::portal::{self, PortalState};
+use rustle_desktop::linux::{binding_help, control};
+use rustle_desktop::Session;
 use tauri::{AppHandle, Manager};
 
 use super::Shared;
@@ -19,9 +19,9 @@ const DIALOG_WAIT: Duration = Duration::from_secs(180);
 
 /// Said when someone tries to change a key the desktop owns.
 pub const OWNED_BY_THE_DESKTOP: &str = "Your desktop owns this shortcut, so change it in the desktop's \
-     settings: on GNOME, Settings → Apps → Flow; on KDE, System Settings → Keyboard → Shortcuts.";
+     settings: on GNOME, Settings → Apps → Rustle; on KDE, System Settings → Keyboard → Shortcuts.";
 
-/// The dictation key as the desktop reports it, while Flow holds it
+/// The dictation key as the desktop reports it, while Rustle holds it
 /// through the portal.
 pub fn portal_key() -> Option<String> {
     portal::state().dictate_trigger().map(portal::display_trigger)
@@ -36,18 +36,18 @@ pub fn permission(session: Session) -> (bool, String) {
     let state = portal::state();
     let help = match &state {
         _ if state.is_bound() => format!(
-            "Your desktop delivers {} to Flow. {OWNED_BY_THE_DESKTOP}",
+            "Your desktop delivers {} to Rustle. {OWNED_BY_THE_DESKTOP}",
             portal_key().unwrap_or_default()
         ),
         PortalState::Binding => {
-            "Your desktop is asking you to confirm Flow's shortcut; answer its dialog.".into()
+            "Your desktop is asking you to confirm Rustle's shortcut; answer its dialog.".into()
         }
         PortalState::Declined => {
             "The desktop's dialog was closed without adding the shortcut. Click Grant to see it again.".into()
         }
         PortalState::Failed(why) => format!("Your desktop could not bind the shortcut: {why}"),
         _ => {
-            "Your desktop hands out global shortcuts. Click Grant and add Flow's in the dialog that appears."
+            "Your desktop hands out global shortcuts. Click Grant and add Rustle's in the dialog that appears."
                 .into()
         }
     };
@@ -58,7 +58,7 @@ pub fn permission(session: Session) -> (bool, String) {
 /// for the user's answer. Starts dictation if it is off, since the binding
 /// belongs to the running engine.
 pub fn request(app: &AppHandle) -> Result<(), String> {
-    let session = flow_desktop::session::detect();
+    let session = rustle_desktop::session::detect();
     if portal::version().is_none() {
         return Err(binding_help(session));
     }

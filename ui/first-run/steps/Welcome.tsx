@@ -3,10 +3,10 @@ import { StepHeader } from "./StepHeader";
 export function WelcomeStep() {
   return (
     <div>
-      <StepHeader title="Welcome to Flow" />
+      <StepHeader title="Welcome to Rustle" />
       <div className="flex flex-col gap-5 text-[14.5px] leading-relaxed">
         <p className="max-w-[52ch]">
-          Flow is dictation for your whole desktop. Hold a key, say what you mean, and the cleaned-up text lands in whatever app
+          Rustle is dictation for your whole desktop. Hold a key, say what you mean, and the cleaned-up text lands in whatever app
           has focus: punctuation added, fillers dropped, and the sentence you changed your mind about halfway through written the
           way you meant it.
         </p>

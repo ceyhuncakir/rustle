@@ -1,5 +1,5 @@
 [package]
-name = "flow"
+name = "rustle"
 description = "Local offline dictation: speak, and cleaned-up text lands in the focused app."
 version.workspace = true
 edition.workspace = true
@@ -7,12 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "flow_lib"
+name = "rustle_lib"
 path = "src/lib.rs"
 crate-type = ["lib"]
 
 [[bin]]
-name = "flow"
+name = "rustle"
 path = "src/main.rs"
 
 [features]
@@ -20,13 +20,13 @@ default = []
 # GPU recognition on any graphics card through ONNX Runtime's WebGPU provider
 # (Vulkan, Direct3D 12 or Metal). What scripts/install-app.sh and the
 # installers build.
-webgpu = ["flow-stt/webgpu"]
+webgpu = ["rustle-stt/webgpu"]
 # GPU recognition on NVIDIA cards through the CUDA provider; needs CUDA 12 and
 # cuDNN 9 on the machine. Cannot be combined with `webgpu`.
-cuda = ["flow-stt/cuda"]
+cuda = ["rustle-stt/cuda"]
 
 [dependencies]
-flow-core.workspace = true
+rustle-core.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
@@ -42,15 +42,15 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = "2.12"
 serde.workspace = true
 serde_json.workspace = true
-flow-desktop.workspace = true
-flow-audio.workspace = true
-flow-stt.workspace = true
+rustle-desktop.workspace = true
+rustle-audio.workspace = true
+rustle-stt.workspace = true
 dirs.workspace = true
 arboard = "3"
 chrono.workspace = true
 toml.workspace = true
 # SIGTERM / SIGINT / SIGHUP, and Ctrl-C or closing the console on Windows,
-# end Flow like Quit, so the GPU is handed back.
+# end Rustle like Quit, so the GPU is handed back.
 ctrlc = { version = "3", features = ["termination"] }
 
 # The island window (src/overlay). Linux: gtk-layer-shell is loaded at run

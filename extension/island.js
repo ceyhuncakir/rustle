@@ -25,7 +25,7 @@ export const Island = GObject.registerClass(
 class Island extends St.BoxLayout {
     _init() {
         super._init({
-            style_class: 'flow-island',
+            style_class: 'rustle-island',
             reactive: false,
             track_hover: false,
             can_focus: false,
@@ -39,7 +39,7 @@ class Island extends St.BoxLayout {
         this.add_child(this._visualizer);
 
         this._label = new St.Label({
-            style_class: 'flow-island-label',
+            style_class: 'rustle-island-label',
             y_align: Clutter.ActorAlign.CENTER,
             visible: false,
         });

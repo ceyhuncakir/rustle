@@ -1,4 +1,4 @@
-// Central palette + geometry for the Flow island.
+// Central palette + geometry for the Rustle island.
 //
 // Colours live here as plain JS rather than in CSS custom properties because
 // the visualizer paints with Cairo, and St's colour objects changed

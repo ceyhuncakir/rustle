@@ -48,7 +48,7 @@ pub fn ensure(app: &AppHandle, host: WebviewHost) -> anyhow::Result<WebviewWindo
         return Ok(window);
     }
     let mut builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("overlay/index.html".into()))
-        .title("Flow")
+        .title("Rustle")
         .decorations(false)
         .transparent(true)
         .shadow(false)

@@ -14,7 +14,7 @@ pub fn open_settings(app: &AppHandle) {
         return;
     }
     let result = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("settings/index.html".into()))
-        .title("Flow")
+        .title("Rustle")
         .inner_size(720.0, 820.0)
         .min_inner_size(560.0, 480.0)
         .center()
@@ -31,7 +31,7 @@ pub fn open_first_run(app: &AppHandle) {
         return;
     }
     let result = WebviewWindowBuilder::new(app, FIRST_RUN, WebviewUrl::App("first-run/index.html".into()))
-        .title("Welcome to Flow")
+        .title("Welcome to Rustle")
         .inner_size(760.0, 640.0)
         .min_inner_size(640.0, 520.0)
         .center()

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Flow listens while you hold the dictation key and recognises your speech on this Mac.</string>
+  <string>Rustle listens while you hold the dictation key and recognises your speech on this Mac.</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

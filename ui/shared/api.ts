@@ -6,7 +6,7 @@
 
 import { invoke, listen, type Unlisten } from "./bridge";
 
-// -- config (crates/flow-core/src/config.rs) ---------------------------------
+// -- config (crates/rustle-core/src/config.rs) ---------------------------------
 
 export interface AudioConfig {
   /** Input device name substring; empty means the system default. */
@@ -106,7 +106,7 @@ export interface SttModel {
   precision: string;
 }
 
-// -- graphics card (crates/flow-stt/src/gpu.rs) --------------------------------
+// -- graphics card (crates/rustle-stt/src/gpu.rs) --------------------------------
 
 export interface GpuDevice {
   name: string;
@@ -251,7 +251,7 @@ export interface DownloadEvent {
 export interface HotkeyEvent {
   down: boolean;
 }
-/** While `install_update` downloads; `done` with no error means Flow restarts now. */
+/** While `install_update` downloads; `done` with no error means Rustle restarts now. */
 export interface UpdateEvent {
   received: number;
   /** 0 while unknown. */
@@ -261,12 +261,12 @@ export interface UpdateEvent {
 }
 
 export interface EventPayloads {
-  "flow:state": StateEvent;
-  "flow:text": TextEvent;
-  "flow:level": LevelEvent;
-  "flow:download": DownloadEvent;
-  "flow:hotkey": HotkeyEvent;
-  "flow:update": UpdateEvent;
+  "rustle:state": StateEvent;
+  "rustle:text": TextEvent;
+  "rustle:level": LevelEvent;
+  "rustle:download": DownloadEvent;
+  "rustle:hotkey": HotkeyEvent;
+  "rustle:update": UpdateEvent;
 }
 
 export function on<E extends keyof EventPayloads>(event: E, handler: (payload: EventPayloads[E]) => void): Promise<Unlisten> {
@@ -295,14 +295,14 @@ export const api = {
   runDoctor: () => invoke<DoctorCheck[]>("run_doctor"),
   copyDiagnostics: () => invoke<string>("copy_diagnostics"),
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
-  /** Downloads over `flow:update`, installs and restarts Flow; rejects when this copy cannot update itself. */
+  /** Downloads over `rustle:update`, installs and restarts Rustle; rejects when this copy cannot update itself. */
   installUpdate: () => invoke<void>("install_update"),
   openReleasePage: () => invoke<void>("open_release_page"),
 
   // audio + recognition
   listInputDevices: () => invoke<InputDevice[]>("list_input_devices"),
   listSttModels: () => invoke<SttModel[]>("list_stt_models"),
-  /** Starts a download reported over `flow:download`; rejects while another runs. */
+  /** Starts a download reported over `rustle:download`; rejects while another runs. */
   downloadModel: (id: string) => invoke<void>("download_model", { id }),
   /** The latest progress of the download in progress, or null. */
   getDownload: () => invoke<DownloadEvent | null>("get_download"),
@@ -332,7 +332,7 @@ export const api = {
   requestPermission: (id: string) => invoke<void>("request_permission", { id }),
 
   // first-run wizard
-  /** Records about two seconds, emitting `flow:level` meanwhile. */
+  /** Records about two seconds, emitting `rustle:level` meanwhile. */
   wizardTestMic: () => invoke<WizardMicResult | null | undefined>("wizard_test_mic"),
   wizardTestTranscribe: () => invoke<WizardTranscribeResult>("wizard_test_transcribe"),
   wizardTestPaste: () => invoke<WizardPasteResult>("wizard_test_paste"),

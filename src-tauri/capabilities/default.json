@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What Flow's own windows may call.",
+  "description": "What Rustle's own windows may call.",
   "windows": ["overlay", "settings", "first-run"],
   "permissions": [
     "core:default",

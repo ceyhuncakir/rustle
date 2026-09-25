@@ -2,12 +2,12 @@
 # Install Ollama into ~/.local without root, and pull the cleanup model.
 #
 # The official installer writes to /usr/local and wants sudo. The release
-# tarball is the same binary and extracts anywhere, so Flow uses that instead.
+# tarball is the same binary and extracts anywhere, so Rustle uses that instead.
 set -euo pipefail
 
 PREFIX="$HOME/.local"
 UNIT_DIR="$HOME/.config/systemd/user"
-MODEL="${FLOW_CLEANUP_MODEL:-qwen3:14b}"
+MODEL="${RUSTLE_CLEANUP_MODEL:-qwen3:14b}"
 
 case "$(uname -m)" in
     x86_64 | amd64) arch=amd64 ;;
@@ -69,7 +69,7 @@ fi
 
 cat > "$UNIT_DIR/ollama.service" <<UNIT
 [Unit]
-Description=Ollama (local model server for Flow)
+Description=Ollama (local model server for Rustle)
 After=network-online.target
 
 [Service]
@@ -103,4 +103,4 @@ echo "pulling $MODEL ..."
 "$PREFIX/bin/ollama" pull "$MODEL"
 
 echo
-echo "done. Check it with: flow doctor"
+echo "done. Check it with: rustle doctor"

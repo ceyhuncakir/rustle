@@ -43,7 +43,7 @@ export function PasteStep() {
 
   return (
     <div>
-      <StepHeader title="Paste-back" lead="After a dictation Flow types the text into whatever has focus. Check that it can reach this field." />
+      <StepHeader title="Paste-back" lead="After a dictation Rustle types the text into whatever has focus. Check that it can reach this field." />
       <textarea
         ref={field}
         value={text}

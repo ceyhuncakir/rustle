@@ -1,6 +1,6 @@
-# Releasing Flow
+# Releasing Rustle
 
-How a version gets from a tag to the machines of people who installed Flow:
+How a version gets from a tag to the machines of people who installed Rustle:
 cutting the release, the secrets the release workflow uses, what gets signed,
 and how installed copies find out about it.
 
@@ -27,14 +27,14 @@ and how installed copies find out about it.
    | Ubuntu 24.04    | `.deb`, `.rpm`, `.AppImage`                       |
    | Windows (x64)   | NSIS `-setup.exe`, `.msi`                         |
 
-   into a **draft** release named "Flow v<version>". With the updater key
+   into a **draft** release named "Rustle v<version>". With the updater key
    set, each job also uploads `.sig` files and merges its platforms into the
    release's `latest.json`. A last job, "Check latest.json", fails if a
    platform went missing (two jobs finishing at once can race); re-run that
    platform's build job, then the check.
 4. Edit the draft's notes and **publish** it. Installed copies only see a
    release once it is published and not a pre-release: the updater asks
-   `https://github.com/ceyhuncakir/flow/releases/latest/download/latest.json`,
+   `https://github.com/ceyhuncakir/rustle/releases/latest/download/latest.json`,
    which GitHub serves from the latest published release.
 
 The notes inside `latest.json` (shown in Settings → Updates) are the
@@ -43,19 +43,19 @@ later.
 
 ## How installed copies update
 
-Flow's Rust side (`src-tauri/src/updates.rs`) uses `tauri-plugin-updater`.
+Rustle's Rust side (`src-tauri/src/updates.rs`) uses `tauri-plugin-updater`.
 Every download is checked against the public key in
 `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`) before anything is
 installed, and `requireSignedVersion` makes the signature name the version,
 so a tampered `latest.json` cannot pass off an older signed build as a new
 one.
 
-| How Flow was installed              | Settings → Updates                                   |
+| How Rustle was installed              | Settings → Updates                                   |
 | ----------------------------------- | ---------------------------------------------------- |
-| AppImage (started normally, `$APPIMAGE` set) | **Install and restart**: replaces the AppImage file in place and restarts. The AppImage's folder must be writable; if it is not, Flow says so and links the releases page. |
+| AppImage (started normally, `$APPIMAGE` set) | **Install and restart**: replaces the AppImage file in place and restarts. The AppImage's folder must be writable; if it is not, Rustle says so and links the releases page. |
 | `.deb` / `.rpm`                     | Shows the new version; points at the releases page (the package manager owns those files). |
-| Windows installer (NSIS or MSI)     | **Install and restart**: runs the new installer in passive mode, which starts Flow again. |
-| macOS app                           | **Install and restart**: replaces `Flow.app` (asks for an administrator password if its folder is not writable) and restarts. |
+| Windows installer (NSIS or MSI)     | **Install and restart**: runs the new installer in passive mode, which starts Rustle again. |
+| macOS app                           | **Install and restart**: replaces `Rustle.app` (asks for an administrator password if its folder is not writable) and restarts. |
 | Built from source (`scripts/install-app.sh`, `cargo run --release`) or a debug build | "Check for updates" reports what is out; nothing is offered and nothing is checked automatically. |
 
 The install kind comes from the bundle type Tauri's bundler stamps into the
@@ -89,17 +89,17 @@ the run, and the release still builds.
 The key pair was generated with
 
 ```sh
-pnpm tauri signer generate --ci -p "" -w ~/.tauri/flow-updater.key
+pnpm tauri signer generate --ci -p "" -w ~/.tauri/rustle-updater.key
 ```
 
-- private key: `~/.tauri/flow-updater.key` (mode 0600, empty password)
-- public key: `~/.tauri/flow-updater.key.pub`, copied into
+- private key: `~/.tauri/rustle-updater.key` (mode 0600, empty password)
+- public key: `~/.tauri/rustle-updater.key.pub`, copied into
   `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`
 
 Upload the private key:
 
 ```sh
-gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/flow-updater.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/rustle-updater.key
 ```
 
 **Back it up now**, somewhere offline (a password manager is fine). Every
@@ -117,7 +117,7 @@ private key. Copies that skip that release can no longer update themselves.
 To sign a local build the way CI does:
 
 ```sh
-TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/flow-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/rustle-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
   pnpm tauri build --features webgpu --config src-tauri/tauri.webgpu.linux.conf.json \
   --config src-tauri/tauri.release.conf.json
 ```
@@ -164,16 +164,16 @@ exists, even empty.
 What gets signed: the bundler signs inside out with the hardened runtime,
 the Dawn library first (`Contents/Frameworks/libwebgpu_dawn.dylib`, from
 `tauri.webgpu.macos.conf.json`; ONNX Runtime is linked statically), then
-`Flow.app` with `src-tauri/Entitlements.plist`, then the DMG; it notarises
+`Rustle.app` with `src-tauri/Entitlements.plist`, then the DMG; it notarises
 and staples the app. The updater's `Flow_aarch64.app.tar.gz` is made from
 the signed app. Entitlements: `device.audio-input` (the microphone under the
 hardened runtime; `device.microphone` is its App Sandbox twin, harmless
-here) and `cs.allow-jit`. Flow sends no Apple Events, so there is no
+here) and `cs.allow-jit`. Rustle sends no Apple Events, so there is no
 `NSAppleEventsUsageDescription`; `Info.plist` carries
 `NSMicrophoneUsageDescription`.
 
 Unsigned macOS builds (no secrets) open only after
-`xattr -dr com.apple.quarantine /Applications/Flow.app`; Gatekeeper
+`xattr -dr com.apple.quarantine /Applications/Rustle.app`; Gatekeeper
 otherwise reports them as damaged.
 
 ### Windows (Authenticode)
@@ -181,17 +181,17 @@ otherwise reports them as damaged.
 The workflow takes a code signing certificate as a base64 `.pfx`:
 
 ```sh
-base64 -w0 flow-codesign.pfx | gh secret set WINDOWS_CERTIFICATE
+base64 -w0 rustle-codesign.pfx | gh secret set WINDOWS_CERTIFICATE
 gh secret set WINDOWS_CERTIFICATE_PASSWORD
 ```
 
-(On Windows: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("flow-codesign.pfx"))`.)
+(On Windows: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("rustle-codesign.pfx"))`.)
 It imports the certificate into the runner's `CurrentUser\My` store and
 passes the bundler one more `--config` with `bundle.windows`:
 `certificateThumbprint` (from the import), `digestAlgorithm: sha256`,
 `timestampUrl: http://timestamp.digicert.com` and `tsp: true` (RFC 3161).
 
-What gets signed: `flow.exe`, the DLLs bundled from
+What gets signed: `rustle.exe`, the DLLs bundled from
 `tauri.webgpu.windows.conf.json` that are not signed already (Dawn's
 `webgpu_dawn.dll`; Microsoft's `dxcompiler.dll` and `dxil.dll` usually are),
 the NSIS installer with its uninstaller and plugins, and the MSI.
@@ -216,7 +216,7 @@ for individuals and organisations first):
 
    ```json
    { "bundle": { "windows": { "signCommand":
-     "trusted-signing-cli -e https://<region>.codesigning.azure.net -a <account> -c <profile> -d Flow %1" } } }
+     "trusted-signing-cli -e https://<region>.codesigning.azure.net -a <account> -c <profile> -d Rustle %1" } } }
    ```
 
    The bundler calls it once per file, `%1` being the file.
@@ -234,7 +234,7 @@ embedded GPG signature. The AppImage's `.sig` is what the updater checks.
 | Artifact | Signed with | Secrets |
 | --- | --- | --- |
 | macOS `.app` (+ Dawn dylib), `.dmg` | Developer ID, hardened runtime, notarised | `APPLE_*` |
-| Windows `flow.exe`, DLLs, `-setup.exe`, `.msi` | Authenticode (SHA-256, RFC 3161 timestamp) | `WINDOWS_CERTIFICATE*` |
+| Windows `rustle.exe`, DLLs, `-setup.exe`, `.msi` | Authenticode (SHA-256, RFC 3161 timestamp) | `WINDOWS_CERTIFICATE*` |
 | Linux `.deb`, `.rpm`, `.AppImage` | (none) | |
 | Update artifacts (`.app.tar.gz`, `.AppImage`, `-setup.exe`, `.msi`, `.deb`, `.rpm`) and their `.sig` | minisign (updater key) | `TAURI_SIGNING_PRIVATE_KEY` |
 
@@ -244,10 +244,10 @@ With a published release vN installed:
 
 1. Publish vN+1 with the updater key set.
 2. AppImage, Windows, macOS: Settings → Updates → Check for updates →
-   Install and restart. Flow comes back on vN+1 with its settings intact.
+   Install and restart. Rustle comes back on vN+1 with its settings intact.
 3. `.deb`/`.rpm`: the check shows vN+1 and "Open releases page".
 4. A copy built with `scripts/install-app.sh`: the check reports vN+1 and
    says to rebuild; no notification ever appears.
 5. With "Check automatically" on, delete `<data dir>/update-check.json` and
-   restart Flow: about 90 seconds later one notification names vN+1, and
+   restart Rustle: about 90 seconds later one notification names vN+1, and
    restarting again does not repeat it.

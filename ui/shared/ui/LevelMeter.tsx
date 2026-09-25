@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useEvent } from "../hooks";
 import { Visualizer } from "../visualizer";
 
-/** The pill's own waveform, fed by `flow:level`. */
+/** The pill's own waveform, fed by `rustle:level`. */
 export function LevelMeter({ className }: { className?: string }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const vis = useRef<Visualizer | null>(null);
@@ -19,7 +19,7 @@ export function LevelMeter({ className }: { className?: string }) {
     };
   }, []);
 
-  useEvent("flow:level", ({ level }) => vis.current?.pushLevel(level));
+  useEvent("rustle:level", ({ level }) => vis.current?.pushLevel(level));
 
   return (
     <canvas

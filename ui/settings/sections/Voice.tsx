@@ -46,11 +46,11 @@ export function VoiceSection() {
   const modelOptions: Option[] = (models.data ?? []).map((m) => ({ value: m.id, label: m.downloaded ? m.label : `${m.label}  (not downloaded)` }));
   if (config.stt.model && !models.data?.some((m) => m.id === config.stt.model)) modelOptions.unshift({ value: config.stt.model, label: config.stt.model });
 
-  // Flow never fetches a model by itself: without the files it cannot dictate.
+  // Rustle never fetches a model by itself: without the files it cannot dictate.
   const modelSubtitle = download.progress
     ? `Downloading ${fetching?.label ?? download.progress.id}…`
     : selected && !selected.downloaded
-      ? `Not downloaded - Flow can't dictate until you download it (${formatMegabytes(selected.download_mb)})`
+      ? `Not downloaded - Rustle can't dictate until you download it (${formatMegabytes(selected.download_mb)})`
       : (selected?.description ?? (models.loading ? "Loading…" : (models.error ?? "")));
 
   const chooseModel = (id: string) => {

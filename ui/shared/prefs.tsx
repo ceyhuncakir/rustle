@@ -157,7 +157,7 @@ interface DownloadHandlers {
 
 /**
  * Start, follow and cancel the recognition model download over
- * `flow:download`. Only one runs at a time, whichever window started it, and
+ * `rustle:download`. Only one runs at a time, whichever window started it, and
  * one already under way when this mounts is picked up where it is.
  */
 export function useModelDownload(handlers: DownloadHandlers) {
@@ -180,7 +180,7 @@ export function useModelDownload(handlers: DownloadHandlers) {
     };
   }, []);
 
-  useEvent("flow:download", (ev) => {
+  useEvent("rustle:download", (ev) => {
     if (!ev.done && !ev.error) {
       setProgress(ev);
       return;

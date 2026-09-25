@@ -4,7 +4,7 @@
 // literally" in bash and zsh), so the ordinary chord pastes nothing and every
 // Linux terminal moves paste to Ctrl+Shift+V.
 //
-// crates/flow-desktop/src/terminal.rs keeps the same list for X11 and the
+// crates/rustle-desktop/src/terminal.rs keeps the same list for X11 and the
 // other Wayland desktops; change both together.
 
 // Lower-case app ids and WM_CLASS names. A name matches whole or by its last

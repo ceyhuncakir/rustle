@@ -55,23 +55,23 @@ version and desktop (for Linux: X11 / GNOME Wayland / KDE Wayland / Hyprland).
 
 ## Graphics card
 
-- [ ] `flow gpu` names every card, says which one recognition uses, and the
+- [ ] `rustle gpu` names every card, says which one recognition uses, and the
       log line `loaded ... on webgpu` (or `on cpu`) agrees with it.
 - [ ] A discrete AMD, Intel Arc or NVIDIA card: recognition runs on it and
       the transcript matches a CPU run of the same take.
 - [ ] Only an integrated GPU: `auto` stays on the CPU; "GPU only" in the
       settings moves it to the GPU after a restart.
-- [ ] No Vulkan driver (Linux): `flow gpu` names the card and the missing
+- [ ] No Vulkan driver (Linux): `rustle gpu` names the card and the missing
       driver; dictation still works on the CPU.
 - [ ] Apple Silicon: recognition runs on the GPU from the installed app
       (Dawn is found in Contents/Frameworks).
 - [ ] Windows: recognition runs on the GPU from the installed app
-      (webgpu_dawn.dll, dxcompiler.dll and dxil.dll beside Flow.exe).
-- [ ] Quit from the tray, `systemctl --user stop flow` and Ctrl-C each end
-      Flow within a second or two with exit code 0; the log shows `unloaded
+      (webgpu_dawn.dll, dxcompiler.dll and dxil.dll beside Rustle.exe).
+- [ ] Quit from the tray, `systemctl --user stop rustle` and Ctrl-C each end
+      Rustle within a second or two with exit code 0; the log shows `unloaded
       <model> from Ollama`, `unloaded <recogniser>` and `released ONNX
       Runtime`; afterwards `ollama ps` is empty and `nvidia-smi` lists no
-      flow process.
+      rustle process.
 
 ## Settings
 
@@ -106,8 +106,8 @@ version and desktop (for Linux: X11 / GNOME Wayland / KDE Wayland / Hyprland).
 - [ ] Island is a non-activating panel: the app under it keeps focus.
 
 ### Linux GNOME Wayland
-- [ ] Extension enabled after logout; `flow doctor` reports its version.
-- [ ] `flow --headless` under the user service works without any window.
+- [ ] Extension enabled after logout; `rustle doctor` reports its version.
+- [ ] `rustle --headless` under the user service works without any window.
 - [ ] With the service enabled, log out and back in: the hotkey works on
       the first try (the service waits for the extension to appear).
 - [ ] Extension on GNOME 50 / 51 (Fedora 44, Ubuntu 26.04): loads, island,
@@ -126,8 +126,8 @@ version and desktop (for Linux: X11 / GNOME Wayland / KDE Wayland / Hyprland).
 
 ### Linux X11
 - [ ] Hotkey grabbed; paste via XTEST works in GTK and Qt apps.
-- [ ] GNOME on X11 with the extension enabled: `flow doctor` says "GNOME
-      Shell (Flow extension present)"; the extension handles the hotkey and
+- [ ] GNOME on X11 with the extension enabled: `rustle doctor` says "GNOME
+      Shell (Rustle extension present)"; the extension handles the hotkey and
       paste, and the shortcut fires once, not twice.
 
 ## Update

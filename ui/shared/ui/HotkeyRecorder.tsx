@@ -7,7 +7,7 @@ interface HotkeyRecorderProps {
   value: string;
   /** Reject (after telling the user why) to keep the new combination on screen for another try. */
   onSave: (combo: string) => void | Promise<unknown>;
-  /** Live state of the shortcut, from `flow:hotkey`. */
+  /** Live state of the shortcut, from `rustle:hotkey`. */
   down?: boolean;
 }
 

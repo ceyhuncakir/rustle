@@ -1,8 +1,8 @@
-// Flow - the Shell half of a local dictation stack.
+// Rustle - the Shell half of a local dictation stack.
 //
 // This process owns everything that only the compositor can do: the floating
 // island, reading which window has focus, and injecting text. All of it is
-// exposed on the session bus so the daemon (flowd) - which owns audio capture,
+// exposed on the session bus so the Rustle app - which owns audio capture,
 // speech recognition and the cleanup model - stays an ordinary user process
 // with no special privileges.
 
@@ -25,12 +25,12 @@ const POLL_MS = 40;
 const DEBOUNCE_MS = 150;
 
 const EXTENSION_VERSION = '6';
-const BUS_NAME = 'ai.flow.Island';
-const OBJECT_PATH = '/ai/flow/Island';
+const BUS_NAME = 'dev.ceyhun.Rustle.Island';
+const OBJECT_PATH = '/dev/ceyhun/Rustle/Island';
 
 const IFACE = `
 <node>
-  <interface name="ai.flow.Island">
+  <interface name="dev.ceyhun.Rustle.Island">
     <method name="Show"/>
     <method name="Hide"/>
     <method name="SetState">
@@ -99,13 +99,13 @@ export default class FlowExtension extends Extension {
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
             () => this._onCancel());
         if (cancel === Meta.KeyBindingAction.NONE)
-            console.error('flow: could not register the cancel shortcut');
+            console.error('rustle: could not register the cancel shortcut');
 
         if (action === Meta.KeyBindingAction.NONE) {
-            console.error('flow: could not register the dictation shortcut - ' +
+            console.error('rustle: could not register the dictation shortcut - ' +
                 'another application may already own it');
         } else {
-            console.log(`flow: dictation shortcut registered ` +
+            console.log(`rustle: dictation shortcut registered ` +
                 `(${this._settings.get_strv('toggle-dictation').join(', ')}); ` +
                 `hold>=${HOLD_THRESHOLD_MS}ms = push-to-talk, ` +
                 `shorter = tap-to-latch, debounce ${DEBOUNCE_MS}ms`);
@@ -226,7 +226,7 @@ export default class FlowExtension extends Extension {
     // -- development only ---------------------------------------------------
 
     /**
-     * FLOW_DEV=1 turns on Mutter's unsafe mode, which lifts the restriction on
+     * RUSTLE_DEV=1 turns on Mutter's unsafe mode, which lifts the restriction on
      * org.gnome.Shell.Screenshot so scripts/capture.py can shoot every island
      * state automatically.
      *
@@ -237,12 +237,12 @@ export default class FlowExtension extends Extension {
      * up enabled at your next real login.
      */
     _enableDevMode() {
-        if (GLib.getenv('FLOW_DEV') !== '1')
+        if (GLib.getenv('RUSTLE_DEV') !== '1')
             return;
 
         this._unsafeModeWas = global.context.unsafe_mode;
         global.context.unsafe_mode = true;
-        console.warn('flow: FLOW_DEV=1 - unsafe mode ON (nested dev session only)');
+        console.warn('rustle: RUSTLE_DEV=1 - unsafe mode ON (nested dev session only)');
     }
 
     /**
@@ -255,14 +255,14 @@ export default class FlowExtension extends Extension {
      * so Eval cannot reach Main; an extension can.
      */
     DevHideOverview() {
-        if (GLib.getenv('FLOW_DEV') !== '1')
+        if (GLib.getenv('RUSTLE_DEV') !== '1')
             return;
         this._guard(() => Main.overview.hide());
     }
 
     /** Fire the hotkey handler directly. Test-only. */
     DevPressHotkey() {
-        if (GLib.getenv('FLOW_DEV') !== '1')
+        if (GLib.getenv('RUSTLE_DEV') !== '1')
             return;
         this._guard(() => this._onHotkey());
     }
@@ -301,7 +301,7 @@ export default class FlowExtension extends Extension {
     SetState(state) {
         // The daemon decides whether a take is running: it drops a press
         // while it is still busy or when the microphone fails, and a take can
-        // start without the extension (`flow hotkey`). Following its state
+        // start without the extension (`rustle hotkey`). Following its state
         // keeps the next tap meaning start or stop as the user expects.
         this._recording = state === 'listening';
         this._guard(() => this._island.setState(state));
@@ -328,7 +328,7 @@ export default class FlowExtension extends Extension {
         try {
             return focusContext();
         } catch (e) {
-            console.error(`flow: focus context failed: ${e}`);
+            console.error(`rustle: focus context failed: ${e}`);
             return {app: '', title: '', role: ''};
         }
     }
@@ -349,7 +349,7 @@ export default class FlowExtension extends Extension {
         try {
             fn();
         } catch (e) {
-            console.error(`flow: ${e}`);
+            console.error(`rustle: ${e}`);
         }
     }
 }

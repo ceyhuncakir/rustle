@@ -1,5 +1,5 @@
 //! macOS: the island as a non-activating panel, the way Spotlight-style
-//! windows are made. Showing it never activates Flow or takes key focus from
+//! windows are made. Showing it never activates Rustle or takes key focus from
 //! the app being dictated into; it floats over normal and full-screen
 //! windows, follows the user across Spaces and lets clicks through.
 //!

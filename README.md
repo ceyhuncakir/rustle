@@ -1,4 +1,4 @@
-# Flow
+# Rustle
 
 Local, offline dictation: hold a key, talk, and cleaned-up text appears in
 whatever app you are in, with a floating island showing what is happening.
@@ -18,7 +18,7 @@ provider of your choice, or not at all.
 | Focus context | The focused app's identity and title feed the cleanup model, so tone adapts per app |
 | Learning | Optional, off by default: picks up your jargon and register over time |
 | Settings | A preferences window, a first-run wizard, and a tray icon |
-| Diagnostics | `flow doctor` checks every moving part and says what is wrong |
+| Diagnostics | `rustle doctor` checks every moving part and says what is wrong |
 
 ## Status
 
@@ -41,8 +41,8 @@ evaluation pass on the Linux development machine.
 ### Linux, GNOME (today)
 
 ```sh
-git clone https://github.com/ceyhuncakir/flow && cd flow
-scripts/install-app.sh            # builds, installs ~/.local/bin/flow, the service, the extension
+git clone https://github.com/ceyhuncakir/rustle && cd rustle
+scripts/install-app.sh            # builds, installs ~/.local/bin/rustle, the service, the extension
 ```
 
 Recognition runs on the graphics card when that is faster: AMD, Intel Arc
@@ -50,12 +50,12 @@ and NVIDIA cards through WebGPU on Vulkan, which needs nothing beyond the
 graphics driver (on Fedora, `mesa-vulkan-drivers` for AMD and Intel). A card
 built into the processor is left alone, because the CPU is faster there (an
 Intel UHD 770 managed 6x realtime against the CPU's 36x); pick "GPU only" in
-the settings to use it anyway. Cards need 4 GB of memory. `flow gpu` shows
+the settings to use it anyway. Cards need 4 GB of memory. `rustle gpu` shows
 what was found and what it will use.
 
 On NVIDIA, `scripts/install-app.sh --cuda` builds for CUDA instead: about 20%
 faster on recognition, which is a few milliseconds per dictation, but it
-needs CUDA 12 and cuDNN 9 and covers the RTX 20 to 40 series only. Flow finds
+needs CUDA 12 and cuDNN 9 and covers the RTX 20 to 40 series only. Rustle finds
 those libraries on the loader path, under `/usr/local/cuda` and in pip's
 `nvidia-*` wheels (`pip install --user nvidia-cudnn-cu12`). `--cpu` leaves
 the GPU out.
@@ -65,8 +65,8 @@ hot-load one). The deb, rpm and AppImage carry the extension too; the setup
 wizard installs it for you, and the same log-out applies. Then either:
 
 ```sh
-systemctl --user start flow       # headless: the extension is the whole UI
-flow                              # or the tray app with the settings window and wizard
+systemctl --user start rustle       # headless: the extension is the whole UI
+rustle                              # or the tray app with the settings window and wizard
 ```
 
 Only one of them dictates at a time; the second says so and leaves the
@@ -90,27 +90,27 @@ keyring, never in the config file.
 
 The app asks the desktop's shortcut portal for the dictation shortcut; KDE
 and Hyprland show their own dialog to confirm it once, and the key you
-pick there is the one Flow shows. Where the portal has no shortcuts
-(sway, river, niri), bind keys in the compositor to `flow hotkey`, which
+pick there is the one Rustle shows. Where the portal has no shortcuts
+(sway, river, niri), bind keys in the compositor to `rustle hotkey`, which
 talks to the running app:
 
 ```sh
 # sway: hold to talk
-bindsym --no-repeat Ctrl+Alt+space exec flow hotkey down
-bindsym --release Ctrl+Alt+space exec flow hotkey up
+bindsym --no-repeat Ctrl+Alt+space exec rustle hotkey down
+bindsym --release Ctrl+Alt+space exec rustle hotkey up
 # Hyprland
-bind = CTRL ALT, space, exec, flow hotkey down
-bindr = CTRL ALT, space, exec, flow hotkey up
+bind = CTRL ALT, space, exec, rustle hotkey down
+bindr = CTRL ALT, space, exec, rustle hotkey up
 # river
-riverctl map normal Control+Alt Space spawn 'flow hotkey down'
-riverctl map -release normal Control+Alt Space spawn 'flow hotkey up'
+riverctl map normal Control+Alt Space spawn 'rustle hotkey down'
+riverctl map -release normal Control+Alt Space spawn 'rustle hotkey up'
 # niri (press only, so tap to start and tap to stop)
-Mod+Space repeat=false { spawn "flow" "hotkey" "toggle"; }
+Mod+Space repeat=false { spawn "rustle" "hotkey" "toggle"; }
 ```
 
-`flow hotkey cancel` drops the take in progress. The island needs
+`rustle hotkey cancel` drops the take in progress. The island needs
 `gtk-layer-shell` (`libgtk-layer-shell0` on Debian and Ubuntu) to float
-above windows without taking focus; without it Flow uses a plain window.
+above windows without taking focus; without it Rustle uses a plain window.
 Pasting needs `dotool`, or `ydotool` with its `ydotoold` service running.
 
 ### Windows and macOS
@@ -138,8 +138,8 @@ GNOME on Wayland rules out the obvious designs, so the split is forced:
 ```
 ┌─ GNOME Shell extension (GJS, in Mutter's process) ────────────────┐
 │  island UI · focus context · text injection · hotkeys             │
-└──────────────────── ai.flow.Island (session bus) ─────────────────┘
-┌─ flow (Rust + Tauri) ─────────────────────────────────────────────┐
+└──────────────────── dev.ceyhun.Rustle.Island (session bus) ─────────────────┘
+┌─ rustle (Rust + Tauri) ─────────────────────────────────────────────┐
 │  engine · audio capture · Parakeet on onnxruntime · cleanup pass  │
 │  tray · settings window · first-run wizard                        │
 │  per-desktop backends: GNOME (D-Bus) · Windows · macOS · X11 ·    │
@@ -153,14 +153,14 @@ concern behind a trait, so the whole dictation path is tested with fakes.
 ## Layout
 
 ```
-crates/flow-core/      engine, cleanup prompts and passes, providers, config, history, learning, secrets
-crates/flow-audio/     microphone capture (cpal + rubato)
-crates/flow-stt/       Parakeet TDT on onnxruntime (ort), model download, parity tests
-crates/flow-desktop/   overlay / hotkey / focus / paste per desktop; GNOME over D-Bus
+crates/rustle-core/      engine, cleanup prompts and passes, providers, config, history, learning, secrets
+crates/rustle-audio/     microphone capture (cpal + rubato)
+crates/rustle-stt/       Parakeet TDT on onnxruntime (ort), model download, parity tests
+crates/rustle-desktop/   overlay / hotkey / focus / paste per desktop; GNOME over D-Bus
 src-tauri/             the app: tray, windows, settings commands, CLI subcommands
 ui/                    overlay pill (canvas), settings and first-run (React)
 extension/             the GNOME Shell extension
-eval/cases.toml        the cleanup evaluation cases (`flow eval`)
+eval/cases.toml        the cleanup evaluation cases (`rustle eval`)
 tests/fixtures/stt/    recognition parity goldens (WAVs regenerate from scripts/stt-golden.py)
 docs/qa-checklist.md   the per-platform manual checklist
 flowd/, tests/*.py     the previous Python implementation, kept until the GNOME path has been the daily driver for a while
@@ -169,41 +169,41 @@ flowd/, tests/*.py     the previous Python implementation, kept until the GNOME 
 ## Command line
 
 ```
-flow                     the tray app (first launch opens the setup wizard)
-flow --headless          engine only, for the GNOME user service
-flow doctor              check every moving part
-flow dictate -s 5        record five seconds, recognise, clean, paste
-flow hotkey down|up|toggle|cancel   drive the running app from a key binding
-flow context             what the desktop reports as the focused app
-flow devices             microphones
-flow gpu                 graphics cards, and whether recognition can use one
-flow config [--edit]     the config file
-flow models status|download|import-hf
-flow eval                run the cleanup cases against the configured model
-flow learning on|off|status · flow vocab [--forget X] · flow learn · flow history [--clear]
+rustle                     the tray app (first launch opens the setup wizard)
+rustle --headless          engine only, for the GNOME user service
+rustle doctor              check every moving part
+rustle dictate -s 5        record five seconds, recognise, clean, paste
+rustle hotkey down|up|toggle|cancel   drive the running app from a key binding
+rustle context             what the desktop reports as the focused app
+rustle devices             microphones
+rustle gpu                 graphics cards, and whether recognition can use one
+rustle config [--edit]     the config file
+rustle models status|download|import-hf
+rustle eval                run the cleanup cases against the configured model
+rustle learning on|off|status · rustle vocab [--forget X] · rustle learn · rustle history [--clear]
 ```
 
 ## Configuration
 
-`config.toml` in `~/.config/flow` (Linux), `~/Library/Application Support/flow`
-(macOS) or `%APPDATA%\flow` (Windows); models and the history database live
-in `~/.local/share/flow`, the same folder on macOS, and `%LOCALAPPDATA%\flow`
+`config.toml` in `~/.config/rustle` (Linux), `~/Library/Application Support/rustle`
+(macOS) or `%APPDATA%\rustle` (Windows); models and the history database live
+in `~/.local/share/rustle`, the same folder on macOS, and `%LOCALAPPDATA%\rustle`
 on Windows. A value in the file that does not fit is skipped on its own and
-`flow doctor` names it. The settings window edits the file in place
+`rustle doctor` names it. The settings window edits the file in place
 and keeps the comments; the file is still the nicer way to set per-app rules
 and the dictionary. The parts worth knowing:
 
 - `[cleanup] dictionary` - names and jargon the recogniser mangles.
 - `[cleanup.app_rules]` - per-application tone, keyed by the app identifier
-  `flow context` prints (a WM class on GNOME, an app name elsewhere).
+  `rustle context` prints (a WM class on GNOME, an app name elsewhere).
 - `[cleanup] style` - `light`, `balanced` or `tidy`.
 - `[cleanup] resolve_intent` - the change-of-mind rule, the only one that
   deletes content.
 - `[cleanup] output_language` - `same`, `en` or `nl`.
-- `[stt] provider` - `auto` uses the graphics card when `flow gpu` says it
+- `[stt] provider` - `auto` uses the graphics card when `rustle gpu` says it
   is faster than the CPU; `gpu` insists (`cuda`, its old name, still works);
   `cpu` never tries. For a CUDA build, CUDA libraries somewhere unusual can
-  be named in `FLOW_CUDA_LIBS` (a path list).
+  be named in `RUSTLE_CUDA_LIBS` (a path list).
 - `[desktop] overlay` - `auto`, `window` or `off` (ignored on GNOME).
 - `[desktop] hotkey` - the shortcut: `Ctrl+Alt+Space` by default, `Option+D`
   (`Alt+D`) on macOS. On GNOME it lives in the extension's settings instead,
@@ -225,28 +225,28 @@ answers or acts on what you dictated. An output more than 1.5x longer than
 the input, or containing a code block, is rejected and the raw transcript is
 pasted instead.
 
-`flow eval` pins all of that against the live model with 28 cases, eight of
+`rustle eval` pins all of that against the live model with 28 cases, eight of
 them verbatim from real dictations where the failure showed up and four in
 Dutch. Reasoning is off by default: on that corpus it scored the same while
 taking 3-21 s instead of 0.1-0.8 s.
 
 ## Learning your vocabulary (off by default)
 
-Switched on, Flow stores your dictations locally in SQLite and periodically
+Switched on, Rustle stores your dictations locally in SQLite and periodically
 mines two things from them with the cleanup model: the names a general
 recogniser gets wrong, and one sentence describing how you write. Both feed
 back into the prompt. Every mined term must appear at least twice in your
-own history before it is kept, and `flow vocab --forget` blocks a term for
+own history before it is kept, and `rustle vocab --forget` blocks a term for
 good. While learning is off, nothing you dictate is stored. What you
 dictate never goes to the log either, unless you ask for it with `-v`.
 
 ## Updates
 
-Installed from a release, Flow checks GitHub once a day and tells you when
+Installed from a release, Rustle checks GitHub once a day and tells you when
 a newer version is out (Settings → Updates, where you can also turn this
 off). The AppImage, Windows and macOS builds update themselves; .deb and
 .rpm installs link to the releases page. Every update is checked against
-Flow's signing key before it is installed. Maintainers: see
+Rustle's signing key before it is installed. Maintainers: see
 [docs/releasing.md](docs/releasing.md).
 
 ## Development
@@ -255,7 +255,7 @@ Flow's signing key before it is installed. Maintainers: see
 pnpm install
 cargo test --workspace                     # 300+ tests, no models needed
 pnpm tauri dev -- --features webgpu        # the app, with GPU recognition (or cuda)
-cargo run -p flow-desktop --example island # drive the live GNOME island over D-Bus
+cargo run -p rustle-desktop --example island # drive the live GNOME island over D-Bus
 scripts/nested-shell.sh                    # a throwaway GNOME Shell for extension work
 .venv/bin/python scripts/stt-golden.py     # regenerate recognition fixtures and goldens
 ```
@@ -265,7 +265,7 @@ workflow builds installers for all three with `tauri-action`.
 
 ## Third-party components
 
-See [THIRD_PARTY.md](THIRD_PARTY.md). Flow itself is MIT licensed.
+See [THIRD_PARTY.md](THIRD_PARTY.md). Rustle itself is MIT licensed.
 
 ## Known limits
 

@@ -23,7 +23,7 @@ import type {
 } from "./api";
 import type { Handler, Unlisten } from "./bridge";
 
-const log = (...args: unknown[]) => console.debug("[flow mock]", ...args);
+const log = (...args: unknown[]) => console.debug("[rustle mock]", ...args);
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // -- event bus ---------------------------------------------------------------
@@ -97,10 +97,10 @@ const updateMode = params.get("update") ?? "install";
 const permissions: Permission[] = [
   {
     id: "hotkey-gnome-extension",
-    label: "Flow GNOME Shell extension",
+    label: "Rustle GNOME Shell extension",
     granted: false,
     required: true,
-    help: "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.",
+    help: "Rustle's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.",
   },
   {
     id: "accessibility",
@@ -231,7 +231,7 @@ const devices: InputDevice[] = [
 let learning: LearningSummary = {
   enabled: false,
   count: 42,
-  terms: ["Flow", "Parakeet", "Mutter", "KVK", "Tauri", "libadwaita", "onnxruntime"],
+  terms: ["Rustle", "Parakeet", "Mutter", "KVK", "Tauri", "libadwaita", "onnxruntime"],
   style: "Short sentences, first person, drops greetings, mixes English and Dutch.",
 };
 
@@ -270,7 +270,7 @@ const commands: Record<string, (args: Args) => unknown> = {
     else if (running) needsRestart = true;
     return needsRestart;
   },
-  get_config_path: () => "/home/you/.config/flow/config.toml",
+  get_config_path: () => "/home/you/.config/rustle/config.toml",
   open_config_file: () => undefined,
 
   get_status: () =>
@@ -306,7 +306,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   copy_diagnostics: () =>
     [
-      "Flow 0.3.0 (mock)",
+      "Rustle 0.3.0 (mock)",
       "Linux 6.19 · GNOME 48 · Wayland",
       `stt: ${config.stt.model} / ${config.stt.provider}`,
       `cleanup: ${config.cleanup.backend} / ${config.cleanup.model}`,
@@ -317,10 +317,10 @@ const commands: Record<string, (args: Args) => unknown> = {
     return updateCheck();
   },
   install_update: () => {
-    if (!updateCheck().can_install) throw new Error("Flow came from a .deb package. Install the new .deb from the releases page.");
+    if (!updateCheck().can_install) throw new Error("Rustle came from a .deb package. Install the new .deb from the releases page.");
     void fakeUpdate();
   },
-  open_release_page: () => void window.open("https://github.com/ceyhuncakir/flow/releases/latest", "_blank"),
+  open_release_page: () => void window.open("https://github.com/ceyhuncakir/rustle/releases/latest", "_blank"),
 
   list_input_devices: () => devices,
   list_stt_models: () => {
@@ -391,7 +391,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   wizard_test_paste: async () => {
     await sleep(500);
     const el = document.activeElement;
-    const sample = "Flow pasted this. ";
+    const sample = "Rustle pasted this. ";
     if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
       const start = el.selectionStart ?? el.value.length;
       const end = el.selectionEnd ?? start;
@@ -432,33 +432,33 @@ function ensureTimers(): void {
   // Like the engine, levels only flow while something records.
   let t = 0;
   window.setInterval(() => {
-    if (!handlers.get("flow:level")?.size) return;
+    if (!handlers.get("rustle:level")?.size) return;
     if (!speaking && overlayState !== "listening") return;
     t += 0.04;
     const envelope = 0.35 + 0.3 * Math.sin(t * 3.1) * Math.sin(t * 0.7);
     const level = Math.max(0, Math.min(1, envelope + (Math.random() - 0.5) * 0.35));
-    emit("flow:level", { level });
+    emit("rustle:level", { level });
   }, 40);
 
   // Hotkey: down for a second every four while the engine runs, so the
   // wizard's indicator moves.
   let down = false;
   window.setInterval(() => {
-    if (!handlers.get("flow:hotkey")?.size || !running) return;
+    if (!handlers.get("rustle:hotkey")?.size || !running) return;
     down = !down;
-    emit("flow:hotkey", { down });
-    if (down) window.setTimeout(() => emit("flow:hotkey", { down: (down = false) }), 1100);
+    emit("rustle:hotkey", { down });
+    if (down) window.setTimeout(() => emit("rustle:hotkey", { down: (down = false) }), 1100);
   }, 4000);
 
-  if (handlers.has("flow:state")) startOverlayCycle();
+  if (handlers.has("rustle:state")) startOverlayCycle();
 }
 
 function startOverlayCycle(): void {
   if (pinnedState) {
     window.setTimeout(() => {
       overlayState = pinnedState;
-      emit("flow:text", { text: pinnedText });
-      emit("flow:state", { state: pinnedState });
+      emit("rustle:text", { text: pinnedText });
+      emit("rustle:state", { state: pinnedState });
     }, 50);
     return;
   }
@@ -480,8 +480,8 @@ function startOverlayCycle(): void {
     const [state, text, ms] = script[i % script.length]!;
     i += 1;
     overlayState = state;
-    emit("flow:text", { text });
-    emit("flow:state", { state });
+    emit("rustle:text", { text });
+    emit("rustle:state", { state });
     window.setTimeout(step, ms);
   };
   window.setTimeout(step, 300);
@@ -489,7 +489,7 @@ function startOverlayCycle(): void {
 
 function report(event: DownloadEvent): void {
   download = event.done ? null : event;
-  emit("flow:download", event);
+  emit("rustle:download", event);
 }
 
 async function fakeDownload(id: string): Promise<void> {
@@ -528,17 +528,17 @@ function updateCheck(): UpdateCheck {
     date: available ? "2026-09-21T10:00:00Z" : null,
     install: packaged ? "deb" : "appimage",
     can_install: !packaged,
-    how: packaged ? "Flow came from a .deb package. Install the new .deb from the releases page, or update it the way you installed it." : null,
-    release_url: "https://github.com/ceyhuncakir/flow/releases/latest",
+    how: packaged ? "Rustle came from a .deb package. Install the new .deb from the releases page, or update it the way you installed it." : null,
+    release_url: "https://github.com/ceyhuncakir/rustle/releases/latest",
   };
 }
 
 async function fakeUpdate(): Promise<void> {
   const total = 96_000_000;
   for (let received = 0; received < total; received += 8_000_000) {
-    emit("flow:update", { received, total, done: false, error: null });
+    emit("rustle:update", { received, total, done: false, error: null });
     await sleep(150);
   }
-  emit("flow:update", { received: total, total, done: true, error: null });
-  log("install_update: Flow would restart into 0.4.0 now");
+  emit("rustle:update", { received: total, total, done: true, error: null });
+  log("install_update: Rustle would restart into 0.4.0 now");
 }

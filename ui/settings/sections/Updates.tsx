@@ -20,7 +20,7 @@ export function UpdatesSection() {
       setFailure(message);
     },
   );
-  useEvent("flow:update", (event) => {
+  useEvent("rustle:update", (event) => {
     if (event.error) {
       setProgress(null);
       setFailure(event.error);
@@ -36,8 +36,8 @@ export function UpdatesSection() {
     : check.error
       ? `Could not check: ${check.error}`
       : result && !result.available
-        ? `Flow ${current} is the latest version`
-        : current && `Flow ${current}`;
+        ? `Rustle ${current} is the latest version`
+        : current && `Rustle ${current}`;
 
   const installing = install.busy || progress !== null;
 
@@ -54,7 +54,7 @@ export function UpdatesSection() {
 
       {result?.available && result.version && (
         <Row
-          title={`Flow ${result.version} is available`}
+          title={`Rustle ${result.version} is available`}
           subtitle={<Released date={result.date} notes={result.notes} />}
           below={
             progress ? (
@@ -79,12 +79,12 @@ export function UpdatesSection() {
       <Row
         title="Check automatically"
         htmlFor="check-updates"
-        subtitle="Once a day, ask GitHub whether a newer Flow is out and say so. Nothing else is sent. Builds from source never ask."
+        subtitle="Once a day, ask GitHub whether a newer Rustle is out and say so. Nothing else is sent. Builds from source never ask."
       >
         <Switch
           id="check-updates"
           checked={config.desktop.check_updates}
-          onChange={(on) => detach(save("desktop", "check_updates", on, on ? "Flow will check once a day" : "Flow will not check on its own"))}
+          onChange={(on) => detach(save("desktop", "check_updates", on, on ? "Rustle will check once a day" : "Rustle will not check on its own"))}
         />
       </Row>
     </Group>
@@ -109,7 +109,7 @@ function InstallProgress({ event }: { event: UpdateEvent }) {
   const { received, total, done } = event;
   const downloaded = total > 0 && received >= total;
   const label = done
-    ? "Installed. Restarting Flow…"
+    ? "Installed. Restarting Rustle…"
     : downloaded
       ? "Installing…"
       : total > 0

@@ -9,12 +9,12 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use flow_core::backends::{self, PROVIDERS};
-use flow_core::config::{self, Config};
-use flow_core::engine::{Recorder, Transcriber};
-use flow_core::models;
-use flow_core::secrets;
 use log::warn;
+use rustle_core::backends::{self, PROVIDERS};
+use rustle_core::config::{self, Config};
+use rustle_core::engine::{Recorder, Transcriber};
+use rustle_core::models;
+use rustle_core::secrets;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use tauri::{AppHandle, Emitter, State};
@@ -107,7 +107,7 @@ pub struct Status {
 #[tauri::command(async)]
 pub fn get_status(shared: App<'_>) -> Status {
     let config = shared.config();
-    let session = flow_desktop::session::detect();
+    let session = rustle_desktop::session::detect();
     Status {
         running: shared.running(),
         state: shared.state.lock().unwrap().as_str().to_string(),
@@ -121,14 +121,14 @@ pub fn get_status(shared: App<'_>) -> Status {
 
 /// The dictation shortcut in the shortcut plugin's notation, whichever
 /// side owns it: on GNOME it lives in the extension's settings.
-pub fn current_hotkey(session: flow_desktop::Session, config: &Config) -> String {
+pub fn current_hotkey(session: rustle_desktop::Session, config: &Config) -> String {
     #[cfg(target_os = "linux")]
     {
-        // Where the portal hands Flow its shortcut, the desktop chose the key.
+        // Where the portal hands Rustle its shortcut, the desktop chose the key.
         if let Some(key) = crate::host::shortcut::portal_key() {
             return key;
         }
-        if matches!(session, flow_desktop::Session::GnomeWayland { .. }) {
+        if matches!(session, rustle_desktop::Session::GnomeWayland { .. }) {
             if let Some(binding) = crate::gnome_extension::binding() {
                 return binding;
             }
@@ -159,8 +159,8 @@ pub fn restart_engine(app: AppHandle, shared: App<'_>) -> Result<(), String> {
 // -- voice ----------------------------------------------------------------------
 
 #[tauri::command(async)]
-pub fn list_input_devices() -> Vec<flow_audio::DeviceInfo> {
-    flow_audio::list_devices()
+pub fn list_input_devices() -> Vec<rustle_audio::DeviceInfo> {
+    rustle_audio::list_devices()
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +178,7 @@ pub struct SttModelInfo {
 
 #[tauri::command(async)]
 pub fn list_stt_models(shared: App<'_>) -> Vec<SttModelInfo> {
-    let precision = flow_stt::gpu::precision_for(&shared.config().stt.provider);
+    let precision = rustle_stt::gpu::precision_for(&shared.config().stt.provider);
     models::STT_MODELS
         .iter()
         .map(|m| SttModelInfo {
@@ -198,8 +198,8 @@ pub fn list_stt_models(shared: App<'_>) -> Vec<SttModelInfo> {
 /// The graphics card and whether recognition can use it. The first call
 /// loads the CUDA libraries, so it stays off the main thread.
 #[tauri::command(async)]
-pub fn detect_gpu() -> flow_stt::GpuReport {
-    flow_stt::gpu::detect().clone()
+pub fn detect_gpu() -> rustle_stt::GpuReport {
+    rustle_stt::gpu::detect().clone()
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -212,7 +212,7 @@ pub struct DownloadEvent {
     pub error: Option<String>,
 }
 
-/// Fetch a model in the background, reporting through `flow:download`. One
+/// Fetch a model in the background, reporting through `rustle:download`. One
 /// download at a time: two would share the cancel switch, and two of the
 /// same model would write the same file.
 #[tauri::command(async)]
@@ -220,7 +220,7 @@ pub fn download_model(app: AppHandle, shared: App<'_>, id: String) -> Result<(),
     if models::stt_model(&id).is_none() {
         return Err(format!("unknown model {id:?}"));
     }
-    let precision = flow_stt::gpu::precision_for(&shared.config().stt.provider);
+    let precision = rustle_stt::gpu::precision_for(&shared.config().stt.provider);
     {
         let mut current = shared.download.lock().unwrap();
         if let Some(running) = current.as_ref() {
@@ -238,12 +238,12 @@ pub fn download_model(app: AppHandle, shared: App<'_>, id: String) -> Result<(),
     let cancel = shared.download_cancel.clone();
     cancel.store(false, Ordering::SeqCst);
     let slot = shared.download.clone();
-    let spawned = std::thread::Builder::new().name("flow-download".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("rustle-download".into()).spawn(move || {
         let report = |event: DownloadEvent| {
             *slot.lock().unwrap() = (!event.done).then(|| event.clone());
-            let _ = app.emit("flow:download", event);
+            let _ = app.emit("rustle:download", event);
         };
-        let result = flow_stt::download(&id, precision, &cancel, |p: flow_stt::Progress| {
+        let result = rustle_stt::download(&id, precision, &cancel, |p: rustle_stt::Progress| {
             report(DownloadEvent {
                 id: id.clone(),
                 file: p.file,
@@ -283,9 +283,9 @@ pub fn cancel_download(shared: App<'_>) {
 }
 
 #[tauri::command(async)]
-pub fn get_compute_report(shared: App<'_>) -> flow_stt::ComputeReport {
+pub fn get_compute_report(shared: App<'_>) -> rustle_stt::ComputeReport {
     let slot = shared.transcriber.lock().unwrap();
-    slot.as_ref().and_then(|(_, t)| t.compute_report()).unwrap_or_else(|| flow_stt::ComputeReport {
+    slot.as_ref().and_then(|(_, t)| t.compute_report()).unwrap_or_else(|| rustle_stt::ComputeReport {
         requested: shared.config().stt.provider,
         actual: "not loaded".into(),
         reason: "the recogniser has not been loaded yet".into(),
@@ -377,9 +377,9 @@ pub struct LearningSummary {
 #[tauri::command(async)]
 pub fn get_learning_summary(shared: App<'_>) -> LearningSummary {
     let enabled = shared.config().learning.enabled;
-    match flow_core::history::History::open_default() {
+    match rustle_core::history::History::open_default() {
         Ok(history) => {
-            let (terms, style) = flow_core::learning::load_profile(&history);
+            let (terms, style) = rustle_core::learning::load_profile(&history);
             LearningSummary { enabled, count: history.count().unwrap_or(0), terms, style }
         }
         Err(_) => LearningSummary { enabled, count: 0, terms: Vec::new(), style: String::new() },
@@ -388,11 +388,11 @@ pub fn get_learning_summary(shared: App<'_>) -> LearningSummary {
 
 #[tauri::command(async)]
 pub fn forget_history(shared: App<'_>) -> Result<u64, String> {
-    let history = flow_core::history::History::open_default().map_err(err)?;
+    let history = rustle_core::history::History::open_default().map_err(err)?;
     let removed = history.clear().map_err(err)?;
     // The running engine holds the learned profile in memory as well.
     if let Some(engine) = shared.engine.lock().unwrap().as_ref() {
-        let _ = engine.tx.send(flow_core::engine::Event::ReloadProfile);
+        let _ = engine.tx.send(rustle_core::engine::Event::ReloadProfile);
     }
     Ok(removed)
 }
@@ -408,14 +408,14 @@ pub fn run_doctor(shared: App<'_>) -> Vec<Check> {
 #[tauri::command(async)]
 pub fn copy_diagnostics(shared: App<'_>) -> String {
     let text = diagnostics(&shared);
-    flow_desktop::copy_text(text.clone());
+    rustle_desktop::copy_text(text.clone());
     text
 }
 
 pub fn diagnostics(shared: &Shared) -> String {
     let config = shared.config();
-    let mut out = format!("Flow {}\n", crate::APP_VERSION);
-    out.push_str(&format!("session: {}\n", flow_desktop::session::detect()));
+    let mut out = format!("Rustle {}\n", crate::APP_VERSION);
+    out.push_str(&format!("session: {}\n", rustle_desktop::session::detect()));
     out.push_str(&format!("config: {}\n", config::config_path().display()));
     if let Some(error) = shared.last_error() {
         out.push_str(&format!("error: {error}\n"));
@@ -461,31 +461,31 @@ pub fn get_permissions() -> Vec<Permission> {
     let mut list = Vec::new();
     #[cfg(target_os = "linux")]
     {
-        use flow_desktop::Session;
-        match flow_desktop::session::detect() {
+        use rustle_desktop::Session;
+        match rustle_desktop::session::detect() {
             Session::GnomeWayland { extension } => {
-                use flow_desktop::linux::gnome;
+                use rustle_desktop::linux::gnome;
                 let running = if extension { gnome::running_extension_version() } else { None };
                 let outdated = extension && gnome::extension_outdated(running.as_deref());
                 list.push(Permission {
                     id: "hotkey-gnome-extension".into(),
-                    label: "Flow GNOME Shell extension".into(),
+                    label: "Rustle GNOME Shell extension".into(),
                     granted: extension && !outdated,
                     required: true,
                     help: if outdated {
                         format!(
-                            "The Shell is running an older copy of Flow's extension ({}), which lacks parts this Flow relies on. Installing this version's copy takes effect after you log out and back in.",
+                            "The Shell is running an older copy of Rustle's extension ({}), which lacks parts this Rustle relies on. Installing this version's copy takes effect after you log out and back in.",
                             running.map_or("no version".to_string(), |v| format!("version {v}"))
                         )
                     } else {
-                        "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.".into()
+                        "Rustle's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.".into()
                     },
                 });
             }
             session @ (Session::KdeWayland | Session::LayerShellWayland | Session::OtherWayland) => {
                 // On PATH is not enough: ydotool needs its daemon, dotool
                 // needs /dev/uinput.
-                let tool = flow_desktop::linux::wayland::probe_tool();
+                let tool = rustle_desktop::linux::wayland::probe_tool();
                 list.push(Permission {
                     id: "paste-tool".into(),
                     label: "Paste helper (dotool or ydotool)".into(),
@@ -494,12 +494,12 @@ pub fn get_permissions() -> Vec<Permission> {
                     help: match tool {
                         Ok(name) => format!("{name} is ready to send the paste keystroke."),
                         Err(why) => format!(
-                            "Wayland lets no ordinary app type into another, so Flow needs dotool or ydotool to send the paste keystroke. {why}"
+                            "Wayland lets no ordinary app type into another, so Rustle needs dotool or ydotool to send the paste keystroke. {why}"
                         ),
                     },
                 });
                 // Through the desktop portal, or the compositor's own
-                // bindings running `flow hotkey`.
+                // bindings running `rustle hotkey`.
                 let (granted, help) = crate::host::shortcut::permission(session);
                 list.push(Permission {
                     id: "hotkey-wayland".into(),
@@ -528,7 +528,7 @@ pub fn get_permissions() -> Vec<Permission> {
             granted: macos::screen_recording_granted(),
             required: false,
             help:
-                "Lets Flow read the focused window's title so the cleanup model can adapt its tone. Optional."
+                "Lets Rustle read the focused window's title so the cleanup model can adapt its tone. Optional."
                     .into(),
         });
     }
@@ -546,7 +546,7 @@ pub fn request_permission(app: AppHandle, id: String) -> Result<(), String> {
         "accessibility" | "screen-recording" => {
             use tauri_plugin_opener::OpenerExt;
             if id == "accessibility" {
-                // Asking puts Flow in the list, switched off, for the user to tick.
+                // Asking puts Rustle in the list, switched off, for the user to tick.
                 macos::prompt_accessibility();
             }
             let pane = if id == "accessibility" { "Privacy_Accessibility" } else { "Privacy_ScreenCapture" };
@@ -610,8 +610,8 @@ mod macos {
         unsafe { CGPreflightScreenCaptureAccess() != 0 }
     }
 
-    /// Shows the system's own "Flow would like to control this computer"
-    /// prompt, which also adds Flow to the Accessibility list.
+    /// Shows the system's own "Rustle would like to control this computer"
+    /// prompt, which also adds Rustle to the Accessibility list.
     pub fn prompt_accessibility() {
         // SAFETY: a one-entry CFDictionary built from constant CF objects,
         // with the standard CFType callbacks, released after use.
@@ -637,7 +637,7 @@ mod macos {
 // -- hotkey and autostart ------------------------------------------------------------
 
 /// Change the dictation shortcut. Nothing changes unless the new one can
-/// be had: a combination another app owns must not leave Flow with none,
+/// be had: a combination another app owns must not leave Rustle with none,
 /// or stop it from starting next time.
 #[tauri::command(async)]
 pub fn set_hotkey(app: AppHandle, shared: App<'_>, combo: String) -> Result<(), String> {
@@ -648,13 +648,14 @@ pub fn set_hotkey(app: AppHandle, shared: App<'_>, combo: String) -> Result<(), 
     // On GNOME the extension owns the shortcut; it rebinds as soon as its
     // setting changes.
     #[cfg(target_os = "linux")]
-    if matches!(flow_desktop::session::detect(), flow_desktop::Session::GnomeWayland { extension: true }) {
+    if matches!(rustle_desktop::session::detect(), rustle_desktop::Session::GnomeWayland { extension: true })
+    {
         return crate::gnome_extension::set_binding(&combo).map_err(err);
     }
-    // Where the desktop's portal hands Flow its shortcut, the desktop picks
+    // Where the desktop's portal hands Rustle its shortcut, the desktop picks
     // the key; asking it for another would change nothing.
     #[cfg(target_os = "linux")]
-    if flow_desktop::linux::portal::active() {
+    if rustle_desktop::linux::portal::active() {
         return Err(crate::host::shortcut::OWNED_BY_THE_DESKTOP.into());
     }
 
@@ -701,10 +702,10 @@ pub fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
 // -- first-run wizard ------------------------------------------------------------------
 
 /// Record from the configured microphone for a fixed time, showing the
-/// level live in the windows as `flow:level`. Returns the take and the
+/// level live in the windows as `rustle:level`. Returns the take and the
 /// loudest level seen.
 fn record_for(app: &AppHandle, config: &Config, seconds: f32) -> Result<(Vec<f32>, f32), String> {
-    use flow_core::engine::Event;
+    use rustle_core::engine::Event;
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut recorder = host::recorder(config, tx);
@@ -716,7 +717,7 @@ fn record_for(app: &AppHandle, config: &Config, seconds: f32) -> Result<(Vec<f32
         match rx.recv_timeout(left) {
             Ok(Event::Level(level)) => {
                 peak = peak.max(level);
-                let _ = app.emit("flow:level", serde_json::json!({ "level": level }));
+                let _ = app.emit("rustle:level", serde_json::json!({ "level": level }));
             }
             Ok(Event::MicError(message)) => {
                 broken = Some(message);
@@ -791,9 +792,9 @@ pub struct PasteTest {
 #[tauri::command(async)]
 pub fn wizard_test_paste(shared: App<'_>) -> Result<PasteTest, String> {
     let config = shared.config();
-    let backends = flow_desktop::build(&config.desktop).map_err(err)?;
+    let backends = rustle_desktop::build(&config.desktop).map_err(err)?;
     let previous = arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok());
-    let marker = "Flow paste test";
+    let marker = "Rustle paste test";
     let focus = backends.focus.context().map(|c| c.app).unwrap_or_default();
     match backends.injector.insert(marker) {
         Ok(()) => {
@@ -818,14 +819,14 @@ pub struct CleanupTest {
 
 #[tauri::command(async)]
 pub fn wizard_test_cleanup(shared: App<'_>) -> CleanupTest {
-    let cleaner = flow_core::cleanup::build_cleaner(&shared.config().cleanup);
+    let cleaner = rustle_core::cleanup::build_cleaner(&shared.config().cleanup);
     let (ok, why) = cleaner.available();
     if !ok {
         return CleanupTest { ok: false, sample: why };
     }
     let sample = cleaner.clean(
         "so um can you look at the the login page it uh it hangs on submit",
-        &flow_core::engine::FocusContext::default(),
+        &rustle_core::engine::FocusContext::default(),
     );
     CleanupTest { ok: true, sample }
 }

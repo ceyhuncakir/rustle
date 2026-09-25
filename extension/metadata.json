@@ -1,7 +1,7 @@
 {
-  "uuid": "flow@ceyhun.dev",
-  "name": "Flow",
-  "description": "Floating dictation island: a local voice-to-text overlay driven over D-Bus by the flowd daemon.",
+  "uuid": "rustle@ceyhun.dev",
+  "name": "Rustle",
+  "description": "Floating dictation island: a local voice-to-text overlay driven over D-Bus by the Rustle app.",
   "shell-version": [
     "47",
     "48",
@@ -13,5 +13,5 @@
   "session-modes": [
     "user"
   ],
-  "settings-schema": "org.gnome.shell.extensions.flow"
+  "settings-schema": "org.gnome.shell.extensions.rustle"
 }

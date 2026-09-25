@@ -1,4 +1,4 @@
-//! Flow's GNOME Shell extension, seen from the app: installing the copy the
+//! Rustle's GNOME Shell extension, seen from the app: installing the copy the
 //! Linux packages carry, and reading or changing its dictation shortcut.
 //!
 //! scripts/install-app.sh installs the extension itself; a deb, rpm or
@@ -9,15 +9,37 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context};
-use log::info;
+use log::{info, warn};
 use tauri::{AppHandle, Manager};
 
-pub const UUID: &str = "flow@ceyhun.dev";
-const SCHEMA: &str = "org.gnome.shell.extensions.flow";
+pub const UUID: &str = "rustle@ceyhun.dev";
+/// The extension's id while the app was called Flow.
+const FLOW_UUID: &str = "flow@ceyhun.dev";
+const SCHEMA: &str = "org.gnome.shell.extensions.rustle";
 const TOGGLE_KEY: &str = "toggle-dictation";
 
 fn installed_dir() -> Option<PathBuf> {
     Some(dirs::data_dir()?.join("gnome-shell/extensions").join(UUID))
+}
+
+/// Remove the extension from when the app was called Flow. Left in place it
+/// would load again at the next login and bind the same shortcut; the copy
+/// the Shell runs now keeps running until then.
+fn retire_flow_extension() {
+    let Some(dir) = dirs::data_dir().map(|dir| dir.join("gnome-shell/extensions").join(FLOW_UUID)) else {
+        return;
+    };
+    let removed = if dir.is_symlink() {
+        std::fs::remove_file(&dir)
+    } else if dir.is_dir() {
+        std::fs::remove_dir_all(&dir)
+    } else {
+        return;
+    };
+    match removed {
+        Ok(()) => info!("removed the old Flow extension from {}", dir.display()),
+        Err(err) => warn!("could not remove the old Flow extension at {}: {err}", dir.display()),
+    }
 }
 
 /// The copy that ships with the app: bundled as a resource, or the source
@@ -33,7 +55,7 @@ fn bundled(app: &AppHandle) -> anyhow::Result<PathBuf> {
     if cfg!(debug_assertions) && source.join("metadata.json").exists() {
         return Ok(source);
     }
-    bail!("this build of Flow does not carry the GNOME extension; install it with scripts/install-app.sh")
+    bail!("this build of Rustle does not carry the GNOME extension; install it with scripts/install-app.sh")
 }
 
 /// Copy the extension into the user's extensions folder, compile its
@@ -62,6 +84,7 @@ pub fn install(app: &AppHandle) -> anyhow::Result<()> {
     }
 
     enable()?;
+    retire_flow_extension();
     info!("installed the GNOME extension into {}", target.display());
     Ok(())
 }
@@ -325,7 +348,7 @@ mod tests {
     fn string_arrays_round_trip() {
         assert_eq!(parse_strv("['<Super>d']\n"), vec!["<Super>d"]);
         assert_eq!(parse_strv("@as []\n"), Vec::<String>::new());
-        assert_eq!(parse_strv("['a@b', 'flow@ceyhun.dev']"), vec!["a@b", "flow@ceyhun.dev"]);
+        assert_eq!(parse_strv("['a@b', 'rustle@ceyhun.dev']"), vec!["a@b", "rustle@ceyhun.dev"]);
         assert_eq!(format_strv(&["a".into(), "b".into()]), "['a', 'b']");
     }
 }

@@ -129,7 +129,7 @@ jobs:
             Write-Output "::warning::WINDOWS_CERTIFICATE is not set: the installer is unsigned and SmartScreen will warn."
             exit 0
           }
-          $pfx = Join-Path $env:RUNNER_TEMP "flow-signing.pfx"
+          $pfx = Join-Path $env:RUNNER_TEMP "rustle-signing.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String(($env:WINDOWS_CERTIFICATE -replace '\s', '')))
           $password = ConvertTo-SecureString -String "$env:WINDOWS_CERTIFICATE_PASSWORD" -Force -AsPlainText
           $imported = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
@@ -156,7 +156,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: "Flow v__VERSION__"
+          releaseName: "Rustle v__VERSION__"
           releaseBody: "See the changelog for what changed."
           releaseDraft: true
           prerelease: false

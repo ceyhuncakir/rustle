@@ -5,8 +5,8 @@ import { Button, useToast } from "../../shared/ui";
 import { useWizard } from "../context";
 
 /**
- * The button for each permission Flow cannot simply ask the OS for. The GNOME
- * extension is installed by Flow and only runs after the next login; the
+ * The button for each permission Rustle cannot simply ask the OS for. The GNOME
+ * extension is installed by Rustle and only runs after the next login; the
  * paste helper is installed by the user, so the button just looks again.
  * Anything else asks Rust to request it.
  */

@@ -10,7 +10,7 @@ export function HotkeyStep() {
   const { hotkey, patch, status, starting, refreshStatus } = useWizard();
   const toast = useToast();
   const [down, setDown] = useState(false);
-  useEvent("flow:hotkey", ({ down }) => setDown(down));
+  useEvent("rustle:hotkey", ({ down }) => setDown(down));
 
   // Rethrows so the recorder keeps the combination for another try.
   const saveHotkey = async (combo: string) => {
@@ -27,11 +27,11 @@ export function HotkeyStep() {
 
   const running = status?.running ?? false;
   const subtitle = starting ? (
-    "Starting Flow…"
+    "Starting Rustle…"
   ) : running ? (
     down ? "Pressed" : "Released"
   ) : (
-    <span className="text-danger">{status?.error ?? "Flow is not running, so the shortcut can't be tried yet"}</span>
+    <span className="text-danger">{status?.error ?? "Rustle is not running, so the shortcut can't be tried yet"}</span>
   );
 
   return (

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.rustle"
+          path="/org/gnome/shell/extensions/rustle/">
+    <key name="toggle-dictation" type="as">
+      <default><![CDATA[['<Super>d']]]></default>
+      <summary>Dictate</summary>
+      <description>
+        Hold to dictate and release to stop, or tap to start and tap again to
+        stop. Which one you get is decided by whether the modifier is still
+        held shortly after the shortcut fires.
+      </description>
+    </key>
+    <key name="push-to-talk" type="b">
+      <default>true</default>
+      <summary>Allow hold-to-talk</summary>
+      <description>
+        When off, the shortcut always toggles and holding it does nothing.
+      </description>
+    </key>
+    <key name="cancel-dictation" type="as">
+      <default><![CDATA[['<Super><Control>Escape']]]></default>
+      <summary>Cancel the current dictation</summary>
+      <description>
+        Stops recording and hides the island without pasting anything.
+        Mutter already uses Super+Escape and Super+Shift+Escape.
+      </description>
+    </key>
+  </schema>
+</schemalist>

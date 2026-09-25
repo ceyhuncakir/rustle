@@ -1,9 +1,9 @@
-//! `flow doctor`: check every moving part and say what is wrong.
+//! `rustle doctor`: check every moving part and say what is wrong.
 
-use flow_core::config::Config;
-use flow_core::models;
-use flow_desktop::HotkeySource;
-use flow_stt::GpuReport;
+use rustle_core::config::Config;
+use rustle_core::models;
+use rustle_desktop::HotkeySource;
+use rustle_stt::GpuReport;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,7 +45,7 @@ fn gpu_check(provider: &str, gpu: &GpuReport) -> Result<String, String> {
         }),
         // Told to use the GPU: fine while there is a card and nothing to fix,
         // such as an integrated GPU that `auto` would pass over.
-        p if flow_stt::gpu::insists_on_gpu(p) => match (&gpu.gpu, &gpu.fix) {
+        p if rustle_stt::gpu::insists_on_gpu(p) => match (&gpu.gpu, &gpu.fix) {
             (Some(card), None) if gpu.backend.is_some() => Ok(format!("{card}, used because provider = {p}")),
             _ => Err(with_fix()),
         },
@@ -55,22 +55,22 @@ fn gpu_check(provider: &str, gpu: &GpuReport) -> Result<String, String> {
 }
 
 /// Where the dictation shortcut comes from: the desktop's portal, the GNOME
-/// extension, a grab of Flow's own, or only the control socket that the
-/// desktop's key bindings reach through `flow hotkey`.
-fn shortcut_check(session: flow_desktop::Session, source: &HotkeySource) -> Result<String, String> {
+/// extension, a grab of Rustle's own, or only the control socket that the
+/// desktop's key bindings reach through `rustle hotkey`.
+fn shortcut_check(session: rustle_desktop::Session, source: &HotkeySource) -> Result<String, String> {
     let main = match source {
-        HotkeySource::AppShortcut(combo) => Ok(format!("{combo}, grabbed by Flow")),
+        HotkeySource::AppShortcut(combo) => Ok(format!("{combo}, grabbed by Rustle")),
         HotkeySource::Builtin(_) => builtin_shortcut(session),
         HotkeySource::External(how) => Ok(format!("socket only - {how}")),
         HotkeySource::Unsupported(why) => Err(format!("none - {why}")),
     };
-    // `flow hotkey` works on every Linux desktop while Flow runs.
+    // `rustle hotkey` works on every Linux desktop while Rustle runs.
     #[cfg(target_os = "linux")]
     let main = {
-        let socket = if flow_desktop::linux::control::listening() {
+        let socket = if rustle_desktop::linux::control::listening() {
             "control socket listening"
         } else {
-            "control socket not listening (Flow is not running)"
+            "control socket not listening (Rustle is not running)"
         };
         let with = |m: String| format!("{}; {socket}", m.trim_end_matches('.'));
         main.map(with).map_err(with)
@@ -79,9 +79,9 @@ fn shortcut_check(session: flow_desktop::Session, source: &HotkeySource) -> Resu
 }
 
 #[cfg(target_os = "linux")]
-fn builtin_shortcut(session: flow_desktop::Session) -> Result<String, String> {
-    use flow_desktop::linux::portal::{self, PortalState};
-    if matches!(session, flow_desktop::Session::GnomeWayland { extension: true }) {
+fn builtin_shortcut(session: rustle_desktop::Session) -> Result<String, String> {
+    use rustle_desktop::linux::portal::{self, PortalState};
+    if matches!(session, rustle_desktop::Session::GnomeWayland { extension: true }) {
         return Ok("GNOME Shell extension".into());
     }
     let version = portal::version().map(|v| format!(" v{v}")).unwrap_or_default();
@@ -97,30 +97,30 @@ fn builtin_shortcut(session: flow_desktop::Session) -> Result<String, String> {
              turn dictation off and on to be asked again"
         )),
         PortalState::Failed(why) => Err(format!("portal{version}: {why}")),
-        // Another process (`flow doctor` next to a running Flow) cannot see
+        // Another process (`rustle doctor` next to a running Rustle) cannot see
         // the binding; the desktop's settings list it.
-        _ => Ok(format!("portal{version}; Flow binds it when dictation starts")),
+        _ => Ok(format!("portal{version}; Rustle binds it when dictation starts")),
     }
 }
 
 /// The Shell keeps running the extension it loaded at login, which after
-/// an upgrade can be older than the copy this Flow carries.
+/// an upgrade can be older than the copy this Rustle carries.
 #[cfg(target_os = "linux")]
 fn extension_check() -> Result<String, String> {
-    use flow_desktop::linux::gnome;
+    use rustle_desktop::linux::gnome;
     let running = gnome::running_extension_version();
     if !gnome::extension_outdated(running.as_deref()) {
         return Ok(format!("version {}", running.as_deref().unwrap_or("?")));
     }
     Err(format!(
-        "{} is running, but this Flow carries version {}: install it under Settings > Desktop, then log out and back in",
+        "{} is running, but this Rustle carries version {}: install it under Settings > Desktop, then log out and back in",
         running.map_or("an unversioned copy".to_string(), |v| format!("version {v}")),
         gnome::bundled_extension_version().unwrap_or_default()
     ))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn builtin_shortcut(_session: flow_desktop::Session) -> Result<String, String> {
+fn builtin_shortcut(_session: rustle_desktop::Session) -> Result<String, String> {
     Ok("delivered by the desktop".into())
 }
 
@@ -133,7 +133,7 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
         "Config",
         match Config::load_with_warnings() {
             Ok((_, warnings)) if warnings.is_empty() => {
-                Ok(flow_core::config::config_path().display().to_string())
+                Ok(rustle_core::config::config_path().display().to_string())
             }
             Ok((_, warnings)) => Err(warnings.join("; ")),
             Err(err) => Err(format!("{err:#}")),
@@ -141,8 +141,8 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     ));
 
     // Desktop integration.
-    let session = flow_desktop::session::detect();
-    match flow_desktop::build_for(session, &config.desktop) {
+    let session = rustle_desktop::session::detect();
+    match rustle_desktop::build_for(session, &config.desktop) {
         Ok(backends) => {
             checks.push(check("Desktop", Ok(session.to_string())));
             checks.push(check("Shortcut", shortcut_check(session, &backends.hotkey)));
@@ -153,7 +153,7 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     // and one merely on PATH may still be unable to type.
     #[cfg(target_os = "linux")]
     {
-        use flow_desktop::Session;
+        use rustle_desktop::Session;
         if matches!(session, Session::GnomeWayland { extension: true }) {
             checks.push(check("GNOME extension", extension_check()));
         }
@@ -164,7 +164,7 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
                 | Session::OtherWayland
                 | Session::GnomeWayland { extension: false }
         ) {
-            let tool = flow_desktop::linux::wayland::probe_tool();
+            let tool = rustle_desktop::linux::wayland::probe_tool();
             checks.push(check("Paste", tool.map(|name| format!("{name} sends the paste keystroke"))));
         }
     }
@@ -174,7 +174,7 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
 
     // Microphone.
     checks.push(check("Microphone", {
-        let devices = flow_audio::list_devices();
+        let devices = rustle_audio::list_devices();
         if devices.is_empty() {
             Err("no input devices".into())
         } else {
@@ -188,7 +188,7 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     }));
 
     // Recognition model files.
-    let precision = flow_stt::gpu::precision_for(&config.stt.provider);
+    let precision = rustle_stt::gpu::precision_for(&config.stt.provider);
     checks.push(check("Recognition model", {
         let id = config.stt.model.as_str();
         if models::stt_model(id).is_none() {
@@ -196,13 +196,13 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
         } else if models::is_downloaded(id, precision) {
             Ok(format!("{id} ({precision:?}) in {}", models::model_dir(id).display()))
         } else {
-            Err(format!("{id} not downloaded - open Settings or run `flow models download`"))
+            Err(format!("{id} not downloaded - open Settings or run `rustle models download`"))
         }
     }));
-    checks.push(check("GPU", gpu_check(&config.stt.provider, flow_stt::gpu::detect())));
+    checks.push(check("GPU", gpu_check(&config.stt.provider, rustle_stt::gpu::detect())));
 
     // Cleanup.
-    let cleaner = flow_core::cleanup::build_cleaner(&config.cleanup);
+    let cleaner = rustle_core::cleanup::build_cleaner(&config.cleanup);
     let (ok, why) = cleaner.available();
     checks.push(check(
         &format!("Cleanup ({})", if config.cleanup.enabled { config.cleanup.model.as_str() } else { "off" }),
@@ -219,9 +219,9 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     // Learning.
     checks.push(check("Learning", {
         if config.learning.enabled {
-            match flow_core::history::History::open_default() {
+            match rustle_core::history::History::open_default() {
                 Ok(history) => {
-                    let (terms, _) = flow_core::learning::load_profile(&history);
+                    let (terms, _) = rustle_core::learning::load_profile(&history);
                     Ok(format!("on - {} stored, {} terms learned", history.count().unwrap_or(0), terms.len()))
                 }
                 Err(err) => Err(format!("history unavailable: {err:#}")),

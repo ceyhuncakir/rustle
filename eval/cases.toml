@@ -1,4 +1,4 @@
-# Cleanup evaluation cases, run with `flow eval` against the configured
+# Cleanup evaluation cases, run with `rustle eval` against the configured
 # cleanup model. Prompt changes are easy to make and hard to judge; these
 # pin down the behaviour that matters, especially the one rule that
 # deletes content: keeping only what the speaker settled on, without

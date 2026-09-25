@@ -1,0 +1,23 @@
+[package]
+name = "rustle-desktop"
+description = "Rustle dictation: overlay, hotkey, focus and text injection per platform."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustle-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+zbus = { version = "5", features = ["blocking-api"] }
+enigo = "0.6"
+# wayland-data-control: the clipboard on KDE and wlroots sessions with no
+# XWayland. Mutter lacks the protocol, so GNOME still goes through XWayland.
+arboard = { version = "3", features = ["wayland-data-control"] }
+active-win-pos-rs = "0.11"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+env_logger.workspace = true

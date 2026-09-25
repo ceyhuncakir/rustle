@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use flow_core::engine::{Overlay, State};
-use flow_desktop::WebviewHost;
+use rustle_core::engine::{Overlay, State};
+use rustle_desktop::WebviewHost;
 use tauri::{AppHandle, Emitter, Manager};
 
 mod window;
@@ -43,7 +43,7 @@ impl WebviewOverlay {
 impl Overlay for WebviewOverlay {
     fn set_state(&self, state: State) {
         let seq = self.hide_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.emit("flow:state", serde_json::json!({ "state": state.as_str() }));
+        self.emit("rustle:state", serde_json::json!({ "state": state.as_str() }));
         let Some(overlay) = self.app.get_webview_window(WINDOW_LABEL) else { return };
 
         if state == State::Hidden {
@@ -62,11 +62,11 @@ impl Overlay for WebviewOverlay {
     }
 
     fn set_text(&self, text: &str) {
-        self.emit("flow:text", serde_json::json!({ "text": text }));
+        self.emit("rustle:text", serde_json::json!({ "text": text }));
     }
 
     fn push_level(&self, level: f32) {
-        self.emit("flow:level", serde_json::json!({ "level": level }));
+        self.emit("rustle:level", serde_json::json!({ "level": level }));
     }
 }
 
@@ -82,5 +82,5 @@ pub fn overlay_resize(app: AppHandle, width: f64, height: f64) {
 #[tauri::command]
 pub fn overlay_ready(app: AppHandle, shared: tauri::State<'_, Arc<crate::host::Shared>>) {
     let state = *shared.state.lock().unwrap();
-    let _ = app.emit_to(WINDOW_LABEL, "flow:state", serde_json::json!({ "state": state.as_str() }));
+    let _ = app.emit_to(WINDOW_LABEL, "rustle:state", serde_json::json!({ "state": state.as_str() }));
 }

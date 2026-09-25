@@ -1,7 +1,7 @@
 //! Updates from GitHub Releases, through tauri-plugin-updater.
 //!
 //! The release workflow publishes `latest.json` beside the installers, each
-//! update artifact signed with Flow's updater key (docs/releasing.md); the
+//! update artifact signed with Rustle's updater key (docs/releasing.md); the
 //! public half is `plugins.updater.pubkey` in tauri.conf.json, and nothing
 //! that key did not sign is installed.
 //!
@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use flow_core::config::data_dir;
 use log::{info, warn};
+use rustle_core::config::data_dir;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::{Update, Updater, UpdaterExt};
@@ -29,15 +29,15 @@ use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use crate::host::{self, Shared};
 
 /// Where a copy that cannot update itself gets the new version.
-pub const RELEASES_URL: &str = "https://github.com/ceyhuncakir/flow/releases/latest";
+pub const RELEASES_URL: &str = "https://github.com/ceyhuncakir/rustle/releases/latest";
 
-/// The least time between two checks Flow makes on its own.
+/// The least time between two checks Rustle makes on its own.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The update the last check found, for `install_update`.
 static PENDING: Mutex<Option<Update>> = Mutex::new(None);
 static INSTALLING: AtomicBool = AtomicBool::new(false);
-/// Set once Flow stopped itself for the Windows installer.
+/// Set once Rustle stopped itself for the Windows installer.
 static HANDED_OVER: AtomicBool = AtomicBool::new(false);
 
 fn describe(e: impl std::fmt::Display) -> String {
@@ -51,7 +51,7 @@ fn describe(e: impl std::fmt::Display) -> String {
 pub enum Install {
     /// A Linux AppImage started through its runtime, which sets `$APPIMAGE`.
     AppImage,
-    /// An AppImage whose folder Flow may not write to, or one run unpacked.
+    /// An AppImage whose folder Rustle may not write to, or one run unpacked.
     AppImageReadOnly,
     Deb,
     Rpm,
@@ -89,8 +89,8 @@ impl Install {
         matches!(self, Install::AppImage | Install::Nsis | Install::Msi | Install::App)
     }
 
-    /// Whether Flow checks on its own. Not for builds from source: whoever
-    /// builds Flow knows where newer code comes from.
+    /// Whether Rustle checks on its own. Not for builds from source: whoever
+    /// builds Rustle knows where newer code comes from.
     fn is_release(self) -> bool {
         !matches!(self, Install::Source | Install::Dev)
     }
@@ -99,13 +99,13 @@ impl Install {
     fn how(self) -> Option<&'static str> {
         Some(match self {
             Install::AppImageReadOnly => {
-                "Flow may not replace this AppImage. Download the new one from the releases page."
+                "Rustle may not replace this AppImage. Download the new one from the releases page."
             }
             Install::Deb => {
-                "Flow came from a .deb package. Install the new .deb from the releases page, or update it the way you installed it."
+                "Rustle came from a .deb package. Install the new .deb from the releases page, or update it the way you installed it."
             }
             Install::Rpm => {
-                "Flow came from an .rpm package. Install the new .rpm from the releases page, or update it the way you installed it."
+                "Rustle came from an .rpm package. Install the new .rpm from the releases page, or update it the way you installed it."
             }
             Install::Source => "This copy was built from source. Pull the new version and run scripts/install-app.sh again.",
             Install::Dev => "A development build does not update itself.",
@@ -135,7 +135,7 @@ fn appimage(_app: &AppHandle) -> Install {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn dir_writable(dir: &Path) -> bool {
-    let probe = dir.join(format!(".flow-update-probe-{}", std::process::id()));
+    let probe = dir.join(format!(".rustle-update-probe-{}", std::process::id()));
     let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
     if ok {
         let _ = std::fs::remove_file(&probe);
@@ -230,7 +230,7 @@ pub async fn check_for_updates(app: AppHandle, shared: State<'_, Arc<Shared>>) -
 
 // -- installing ------------------------------------------------------------------
 
-/// `flow:update`, while `install_update` downloads. `total` is 0 while unknown.
+/// `rustle:update`, while `install_update` downloads. `total` is 0 while unknown.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateEvent {
     pub received: u64,
@@ -240,19 +240,19 @@ pub struct UpdateEvent {
 }
 
 fn report(app: &AppHandle, event: UpdateEvent) {
-    if let Err(err) = app.emit("flow:update", event) {
+    if let Err(err) = app.emit("rustle:update", event) {
         warn!("could not report update progress: {err}");
     }
 }
 
 /// Download the update the last check found, verify its signature, put it
 /// in place and restart into it. On Windows the installer takes over and
-/// starts the new Flow itself.
+/// starts the new Rustle itself.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, shared: State<'_, Arc<Shared>>) -> Result<(), String> {
     let install = Install::detect(&app);
     if !install.can_install() {
-        return Err(install.how().unwrap_or("This copy of Flow cannot update itself.").to_string());
+        return Err(install.how().unwrap_or("This copy of Rustle cannot update itself.").to_string());
     }
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err("The update is already being installed.".into());
@@ -270,9 +270,9 @@ async fn download_and_install(app: &AppHandle, shared: &Arc<Shared>) -> Result<(
     let pending = PENDING.lock().unwrap().take();
     let update = match pending {
         Some(update) => update,
-        None => fetch(app, shared).await?.ok_or("Flow is already up to date.")?,
+        None => fetch(app, shared).await?.ok_or("Rustle is already up to date.")?,
     };
-    info!("downloading Flow {}", update.version);
+    info!("downloading Rustle {}", update.version);
 
     let (mut received, mut total) = (0u64, 0u64);
     let mut last = Instant::now();
@@ -290,25 +290,25 @@ async fn download_and_install(app: &AppHandle, shared: &Arc<Shared>) -> Result<(
             || {},
         )
         .await
-        .map_err(|e| format!("Could not download Flow {}: {}", update.version, describe(e)))?;
+        .map_err(|e| format!("Could not download Rustle {}: {}", update.version, describe(e)))?;
     report(app, UpdateEvent { received, total: total.max(received), done: false, error: None });
 
-    info!("installing Flow {}", update.version);
+    info!("installing Rustle {}", update.version);
     let version = update.version.clone();
     let installed =
         tauri::async_runtime::spawn_blocking(move || update.install(bytes)).await.map_err(describe)?;
     if let Err(error) = installed {
-        let error = format!("Could not install Flow {version}: {}", describe(error));
+        let error = format!("Could not install Rustle {version}: {}", describe(error));
         if HANDED_OVER.load(Ordering::SeqCst) {
-            // Windows: Flow stopped for an installer that then did not
+            // Windows: Rustle stopped for an installer that then did not
             // start. Recognition is gone with the GPU; start over.
-            crate::windows::notify(app, "Flow could not update", &error);
+            crate::windows::notify(app, "Rustle could not update", &error);
             app.request_restart();
         }
         return Err(error);
     }
 
-    info!("installed Flow {version}; restarting into it");
+    info!("installed Rustle {version}; restarting into it");
     report(app, UpdateEvent { received, total: total.max(received), done: true, error: None });
     // Through RunEvent::Exit, which stops the engine and hands the GPU back.
     app.request_restart();
@@ -323,7 +323,7 @@ pub fn open_release_page(app: AppHandle) -> Result<(), String> {
 
 // -- checking on its own ---------------------------------------------------------
 
-/// When Flow last asked, and which version it last told the user about.
+/// When Rustle last asked, and which version it last told the user about.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Stamp {
     /// Unix seconds.
@@ -371,13 +371,13 @@ impl Stamp {
     }
 }
 
-/// Check once a day at most while Flow runs, and send a notification the
+/// Check once a day at most while Rustle runs, and send a notification the
 /// first time a new version turns up. Only for copies installed from a
 /// release, and only while `desktop.check_updates` is on.
 pub fn watch(app: AppHandle, shared: Arc<Shared>) {
     let install = Install::detect(&app);
     if !install.is_release() {
-        info!("{install:?} build: Flow does not check for updates on its own");
+        info!("{install:?} build: Rustle does not check for updates on its own");
         return;
     }
     let spawned = std::thread::Builder::new().name("update-check".into()).spawn(move || {
@@ -403,15 +403,15 @@ async fn check_quietly(app: &AppHandle, shared: &Arc<Shared>, install: Install) 
         Ok(Some(update)) => {
             if told.as_deref() != Some(update.version.as_str()) {
                 let body = if install.can_install() {
-                    "Open Flow's settings to install it."
+                    "Open Rustle's settings to install it."
                 } else {
-                    "Flow's settings link to the release."
+                    "Rustle's settings link to the release."
                 };
-                crate::windows::notify(app, &format!("Flow {} is available", update.version), body);
+                crate::windows::notify(app, &format!("Rustle {} is available", update.version), body);
             }
             *PENDING.lock().unwrap() = Some(update);
         }
-        Ok(None) => info!("update check: Flow is up to date"),
+        Ok(None) => info!("update check: Rustle is up to date"),
         Err(err) => {
             // Offline, or GitHub unreachable: try again tomorrow, not hourly.
             Stamp::load().checked(None).save();
@@ -473,7 +473,7 @@ mod tests {
         assert!(updater.require_signed_version);
         assert_eq!(
             updater.endpoints.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
-            ["https://github.com/ceyhuncakir/flow/releases/latest/download/latest.json"]
+            ["https://github.com/ceyhuncakir/rustle/releases/latest/download/latest.json"]
         );
         assert!(!updater.pubkey.is_empty());
         // Local builds must not need the private key: only the release

@@ -23,12 +23,12 @@ export function DoneStep() {
           className="control w-full resize-none rounded-card px-4 py-3 text-[15px] leading-relaxed placeholder:text-fg-3"
         />
         {starting ? (
-          <p className="mt-2 text-[13px] text-fg-2">Starting Flow…</p>
+          <p className="mt-2 text-[13px] text-fg-2">Starting Rustle…</p>
         ) : (
           status &&
           !status.running && (
             <div className="mt-2">
-              <Outcome ok={false}>{status.error ?? "Flow is not running."}</Outcome>
+              <Outcome ok={false}>{status.error ?? "Rustle is not running."}</Outcome>
             </div>
           )
         )}

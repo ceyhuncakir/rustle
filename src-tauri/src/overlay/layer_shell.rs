@@ -22,7 +22,7 @@ const LIBRARY_NAMES: [&str; 2] = ["libgtk-layer-shell.so.0", "libgtk-layer-shell
 const LAYER_OVERLAY: c_int = 3;
 const EDGE_BOTTOM: c_int = 3;
 const KEYBOARD_MODE_NONE: c_int = 0;
-const NAMESPACE: &[u8] = b"flow\0";
+const NAMESPACE: &[u8] = b"rustle\0";
 
 type InitFn = unsafe extern "C" fn(*mut c_void);
 type IntFn = unsafe extern "C" fn(*mut c_void, c_int);

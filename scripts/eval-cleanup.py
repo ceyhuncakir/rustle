@@ -226,20 +226,20 @@ def main() -> int:
     cfg = Config.load().cleanup
     cleaner = Cleaner(
         endpoint=cfg.endpoint,
-        model=__import__("os").environ.get("FLOW_MODEL", cfg.model),
+        model=__import__("os").environ.get("RUSTLE_MODEL", cfg.model),
         timeout=cfg.timeout,
         dictionary=cfg.dictionary, app_rules=cfg.app_rules,
         keep_alive=cfg.keep_alive, style=cfg.style,
         resolve_intent=cfg.resolve_intent,
-        think=__import__("os").environ.get("FLOW_THINK", cfg.think),
+        think=__import__("os").environ.get("RUSTLE_THINK", cfg.think),
         languages=cfg.languages,
         output_language=cfg.output_language,
     )
 
-    # FLOW_EVAL_PROFILE=1 injects a realistic learned profile, to check that
+    # RUSTLE_EVAL_PROFILE=1 injects a realistic learned profile, to check that
     # personalisation does not cost accuracy - prompt length has regressed
     # cases before.
-    if __import__("os").environ.get("FLOW_EVAL_PROFILE") == "1":
+    if __import__("os").environ.get("RUSTLE_EVAL_PROFILE") == "1":
         cleaner.set_profile(
             ["Whisper Flow", "Ptyxis", "interopt", "PufferLib", "Parakeet",
              "auth middleware", "Figma", "Ollama", "Qwen", "Mutter"],

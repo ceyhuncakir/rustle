@@ -56,7 +56,7 @@ function Settings() {
     async () => {
       await api.restartEngine();
       setNeedsRestart(false);
-      toast("Restarting Flow…");
+      toast("Restarting Rustle…");
       await refreshStatus();
     },
     (message) => toast(`Could not restart: ${message}`),
@@ -78,7 +78,7 @@ function Settings() {
       <div className="min-h-full">
         {needsRestart && status?.running && (
           <div className="sticky top-0 z-30">
-            <Banner title="Restart Flow to apply your changes" action="Restart" busy={restart.busy} onAction={() => void restart.start()} />
+            <Banner title="Restart Rustle to apply your changes" action="Restart" busy={restart.busy} onAction={() => void restart.start()} />
           </div>
         )}
         <main className="mx-auto flex w-full max-w-[720px] flex-col gap-8 px-6 pt-6 pb-16">

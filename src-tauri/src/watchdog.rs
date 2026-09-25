@@ -1,23 +1,23 @@
-//! Unloads the local cleanup model from Ollama when Flow ends without doing
+//! Unloads the local cleanup model from Ollama when Rustle ends without doing
 //! it itself: `kill -9`, a crash, the OOM killer, "End task" on Windows.
-//! Ollama cannot tell that Flow is gone and would otherwise keep the model
-//! in video memory for `keep_alive`, an hour by default. Flow's own GPU
+//! Ollama cannot tell that Rustle is gone and would otherwise keep the model
+//! in video memory for `keep_alive`, an hour by default. Rustle's own GPU
 //! memory needs no such help: the driver frees it when the process ends.
 //!
-//! The watchdog is a second `flow` process that holds the read end of a pipe
-//! whose write end only Flow has. However Flow ends, the OS closes the write
+//! The watchdog is a second `rustle` process that holds the read end of a pipe
+//! whose write end only Rustle has. However Rustle ends, the OS closes the write
 //! end and the watchdog reads end-of-file. A clean shutdown writes one byte
 //! first, meaning "unloaded already"; end-of-file with nothing before it
-//! means Flow died, and the watchdog unloads the model. It also unloads when
+//! means Rustle died, and the watchdog unloads the model. It also unloads when
 //! it is itself told to stop (SIGTERM, Ctrl-C), which is what systemd does to
 //! the rest of the service when its main process dies.
 
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
-use flow_core::backends::{Backend, OllamaBackend};
-use flow_core::config::CleanupConfig;
 use log::{info, warn};
+use rustle_core::backends::{Backend, OllamaBackend};
+use rustle_core::config::CleanupConfig;
 
 /// The byte a clean shutdown sends before closing the pipe.
 const STAND_DOWN: &[u8] = b"x";
@@ -58,7 +58,7 @@ impl Watchdog {
         }
     }
 
-    /// Flow stopped cleanly and unloaded the model itself.
+    /// Rustle stopped cleanly and unloaded the model itself.
     pub fn stand_down(mut self) {
         if let Some(mut pipe) = self.pipe.take() {
             // Fails harmlessly when the watchdog already went, say because
@@ -69,8 +69,8 @@ impl Watchdog {
     }
 }
 
-/// `flow watch-ollama`: wait for Flow to end, then unload the model unless
-/// Flow said it had.
+/// `rustle watch-ollama`: wait for Rustle to end, then unload the model unless
+/// Rustle said it had.
 pub fn run(endpoint: &str, model: &str) -> anyhow::Result<()> {
     let backend = OllamaBackend::new(model, endpoint, "0");
     let on_signal = OllamaBackend::new(model, endpoint, "0");
@@ -80,15 +80,15 @@ pub fn run(endpoint: &str, model: &str) -> anyhow::Result<()> {
     }) {
         warn!("watchdog: cannot catch termination signals: {err}");
     }
-    if flow_died(std::io::stdin().lock()) {
-        info!("watchdog: Flow ended without unloading {model}; unloading it");
+    if rustle_died(std::io::stdin().lock()) {
+        info!("watchdog: Rustle ended without unloading {model}; unloading it");
         backend.unload();
     }
     Ok(())
 }
 
-/// Blocks until end-of-file. True when nothing came first: Flow died.
-fn flow_died(mut pipe: impl Read) -> bool {
+/// Blocks until end-of-file. True when nothing came first: Rustle died.
+fn rustle_died(mut pipe: impl Read) -> bool {
     let mut received = Vec::new();
     let _ = pipe.read_to_end(&mut received);
     received.is_empty()
@@ -100,12 +100,12 @@ mod tests {
 
     #[test]
     fn end_of_file_alone_means_flow_died() {
-        assert!(flow_died(&b""[..]));
+        assert!(rustle_died(&b""[..]));
     }
 
     #[test]
     fn a_clean_shutdown_stands_the_watchdog_down() {
-        assert!(!flow_died(STAND_DOWN));
+        assert!(!rustle_died(STAND_DOWN));
     }
 
     #[test]

@@ -1,0 +1,31 @@
+[package]
+name = "rustle-audio"
+description = "Rustle dictation: microphone capture."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustle-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+# cpal's default Linux host is ALSA, which on a PipeWire desktop goes through
+# the pipewire-alsa shim - the same path PortAudio used before. That needs
+# only libasound2-dev at build time, which is what CI has.
+cpal = "0.18"
+rubato = "5"
+
+[dev-dependencies]
+# So `cargo test -- --ignored --nocapture` with RUST_LOG=info shows which
+# device and format the manual recording test picked.
+env_logger.workspace = true
+
+[features]
+default = []
+# cpal 0.18's native PipeWire host. Off by default because it compiles
+# against libpipewire-0.3 headers, which neither this dev box nor the
+# ubuntu-22.04 CI image has (`pkg-config --exists libpipewire-0.3` fails).
+# Turn it on only on a machine with pipewire-devel installed.
+pipewire = ["cpal/pipewire"]

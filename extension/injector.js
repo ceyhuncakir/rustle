@@ -151,7 +151,7 @@ export class Injector {
                 return GLib.SOURCE_CONTINUE;
 
             if (held !== 0)
-                console.warn(`flow: modifiers still held (0x${held.toString(16)}), pasting anyway`);
+                console.warn(`rustle: modifiers still held (0x${held.toString(16)}), pasting anyway`);
             callback();
             return GLib.SOURCE_REMOVE;
         };
@@ -182,7 +182,7 @@ export class Injector {
             try {
                 result = callback();
             } catch (e) {
-                console.error(`flow: paste failed: ${e}`);
+                console.error(`rustle: paste failed: ${e}`);
             }
             if (result !== GLib.SOURCE_CONTINUE)
                 this._sources.delete(id);

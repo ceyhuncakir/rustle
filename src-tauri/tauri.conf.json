@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Flow",
+  "productName": "Rustle",
   "version": "../package.json",
-  "identifier": "ai.flow.app",
+  "identifier": "dev.ceyhun.Rustle",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -32,11 +32,11 @@
     ],
     "linux": {
       "deb": {
-        "desktopTemplate": "../packaging/flow.desktop.template",
+        "desktopTemplate": "../packaging/rustle.desktop.template",
         "recommends": ["libgtk-layer-shell0"]
       },
       "rpm": {
-        "desktopTemplate": "../packaging/flow.desktop.template",
+        "desktopTemplate": "../packaging/rustle.desktop.template",
         "recommends": ["gtk-layer-shell"]
       }
     },
@@ -54,7 +54,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQxMkY5MDAxOEEyOEQ3NzUKUldSMTF5aUtBWkF2UVhCUFY2TFl0MnoxNzVJVGJYVnEvK2lxVm4rL3JNNm5XNFlqd3VWL01EcEwK",
-      "endpoints": ["https://github.com/ceyhuncakir/flow/releases/latest/download/latest.json"],
+      "endpoints": ["https://github.com/ceyhuncakir/rustle/releases/latest/download/latest.json"],
       "requireSignedVersion": true,
       "windows": {
         "installMode": "passive"
