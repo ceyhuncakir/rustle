@@ -25,8 +25,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
             libasound2-dev libdbus-1-dev libxcb-ewmh-dev libxcb-randr0-dev pkg-config libxdo-dev
-      - uses: dtolnay/rust-toolchain@stable
+      # The version in rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.98.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Format

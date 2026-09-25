@@ -1,0 +1,6 @@
+# The compiler for local builds, CI and releases. Each Rust release brings new
+# clippy lints, so a floating "stable" can fail CI with no change to the code.
+# Bump this on purpose, together with `toolchain:` in .github/workflows.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

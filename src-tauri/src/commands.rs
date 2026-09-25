@@ -456,6 +456,8 @@ pub struct Permission {
 
 #[tauri::command(async)]
 pub fn get_permissions() -> Vec<Permission> {
+    // Windows asks for nothing up front.
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut list = Vec::new();
     #[cfg(target_os = "linux")]
     {

@@ -256,7 +256,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             for row in rows.iter().rev() {
                 println!(
                     "{}  {:<18}  {}",
-                    &row.at.get(11..19).unwrap_or(&row.at),
+                    row.at.get(11..19).unwrap_or(&row.at),
                     short(&row.app, 18),
                     short(&row.clean, 60)
                 );
@@ -280,8 +280,8 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                         last = p.file.clone();
                         eprintln!("{}", p.file);
                     }
-                    if p.total > 0 {
-                        eprint!("\r  {:>3}%", p.received * 100 / p.total);
+                    if let Some(percent) = (p.received * 100).checked_div(p.total) {
+                        eprint!("\r  {percent:>3}%");
                     }
                 })?;
                 eprintln!("\ndone: {}", models::model_dir(&config.stt.model).display());

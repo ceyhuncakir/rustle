@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use flow_core::config::data_dir;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 
 use crate::host::{self, Shared};
@@ -116,6 +116,7 @@ impl Install {
 
 #[cfg(target_os = "linux")]
 fn appimage(app: &AppHandle) -> Install {
+    use tauri::Manager;
     // The updater renames the AppImage aside and writes the new one in its
     // place, so it needs the folder, not just the file.
     let writable =

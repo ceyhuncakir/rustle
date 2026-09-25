@@ -52,8 +52,10 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME, package.json $app and Cargo.toml $crate must agree"
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@stable
+      # The version in rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.98.1
           targets: ${{ contains(matrix.args, 'aarch64-apple') && 'aarch64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
