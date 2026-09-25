@@ -114,8 +114,10 @@ mod tests {
     #[test]
     fn cases_parse_and_are_complete() {
         let cases = super::cases().unwrap();
-        assert_eq!(cases.len(), 28);
+        assert_eq!(cases.len(), 33);
         assert!(cases.iter().all(|c| !c.raw.is_empty() && !c.name.is_empty()));
         assert!(cases.iter().filter(|c| c.name.starts_with("dutch")).count() >= 4);
+        let others = ["german", "french", "spanish", "italian", "polish"];
+        assert_eq!(cases.iter().filter(|c| others.iter().any(|l| c.name.starts_with(l))).count(), 5);
     }
 }

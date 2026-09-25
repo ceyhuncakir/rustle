@@ -139,20 +139,28 @@ const SECTION_VOICE: &str = r#"PRESERVE THEIR VOICE
 
 Output only the final text, nothing else. If the input is empty or unintelligible, output nothing at all."#;
 
-/// The rule that stops the model drifting into English, with `{spoken}`
-/// standing for the languages named in the config.
+/// The rule that stops the model drifting into English, with `{rule}`
+/// standing for [`RULE_NAMED`] or [`RULE_ANY`].
 ///
 /// An English system prompt quietly pulls the output towards English: Dutch
 /// in came back as English out for roughly half of test sentences until this
 /// was stated explicitly.
 const LANGUAGE_SECTION: &str = r#"LANGUAGE
-   The speaker dictates in {spoken}. Write your output in the SAME language they spoke. Never translate. A transcript spoken in one of those languages must come back in that same language, however English these instructions are.
+   {rule}
 
    Dutch technical speech is full of English loanwords - "middleware", "deployen", "fixen", "de pipeline", "een bug" - and borrowing them does NOT make a sentence English. Judge by the sentence structure and the common words: if those are Dutch, the sentence is Dutch, so keep it in Dutch and leave the loanwords as spoken.
      in:  "Kun je even kijken naar de authenticatie middleware voordat we deployen?"
      out: "Kun je even kijken naar de authenticatie middleware voordat we deployen?"
      WRONG: any English translation of it.
 "#;
+
+/// The language rule when the config names the languages spoken; `{spoken}`
+/// stands for their names.
+const RULE_NAMED: &str = "The speaker dictates in {spoken}. Write your output in the SAME language they spoke. Never translate. A transcript spoken in one of those languages must come back in that same language, however English these instructions are.";
+
+/// The language rule when the config names none: the recogniser takes any
+/// of its languages, and so does the cleanup.
+const RULE_ANY: &str = "The speaker may dictate in any language. Write your output in the SAME language they spoke. Never translate. A transcript must come back in the language it was spoken in, however English these instructions are.";
 
 /// Template for the translation pass; `{target}` is the language name.
 const TRANSLATE_PROMPT: &str = r#"You are translating already cleaned-up dictated text into {target}.
@@ -205,20 +213,50 @@ fn style_note(style: &str) -> &'static str {
     }
 }
 
+/// The languages Parakeet TDT v3 recognises, by ISO 639-1 code, with the
+/// names the prompts use. The settings window offers the same list.
+pub const LANGUAGES: &[(&str, &str)] = &[
+    ("bg", "Bulgarian"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("de", "German"),
+    ("el", "Greek"),
+    ("en", "English"),
+    ("es", "Spanish"),
+    ("et", "Estonian"),
+    ("fi", "Finnish"),
+    ("fr", "French"),
+    ("hr", "Croatian"),
+    ("hu", "Hungarian"),
+    ("it", "Italian"),
+    ("lt", "Lithuanian"),
+    ("lv", "Latvian"),
+    ("mt", "Maltese"),
+    ("nl", "Dutch"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("sk", "Slovak"),
+    ("sl", "Slovenian"),
+    ("sv", "Swedish"),
+    ("uk", "Ukrainian"),
+];
+
 /// The name a language code is given in the prompts; unknown codes are
 /// used as they are.
 fn language_name(code: &str) -> &str {
-    match code {
-        "en" => "English",
-        "nl" => "Dutch",
-        other => other,
-    }
+    LANGUAGES.iter().find(|(c, _)| *c == code).map_or(code, |(_, name)| name)
 }
 
 fn language_section(languages: &[String]) -> String {
-    let names: Vec<&str> = languages.iter().map(|c| language_name(c)).collect();
-    let spoken = if names.is_empty() { "English".to_string() } else { names.join(" or ") };
-    LANGUAGE_SECTION.replace("{spoken}", &spoken)
+    let rule = if languages.is_empty() {
+        RULE_ANY.to_string()
+    } else {
+        let names: Vec<&str> = languages.iter().map(|c| language_name(c)).collect();
+        RULE_NAMED.replace("{spoken}", &names.join(" or "))
+    };
+    LANGUAGE_SECTION.replace("{rule}", &rule)
 }
 
 fn translate_prompt(target: &str) -> String {
@@ -226,7 +264,7 @@ fn translate_prompt(target: &str) -> String {
 }
 
 /// Assemble the numbered rule sections for this configuration. No languages
-/// means English.
+/// means any language.
 fn build_system_prompt(style: &str, resolve_intent: bool, languages: &[String]) -> String {
     // Order matters: decide what survives BEFORE polishing it. With grammar
     // repair first the model commits to a tidy sentence and then treats a
@@ -1075,9 +1113,12 @@ mod tests {
     fn spoken_languages_are_named_in_the_prompt() {
         assert!(build_system_prompt("balanced", true, &strings(&["en", "nl"])).contains("English or Dutch"));
         assert!(build_system_prompt("balanced", true, &strings(&["en"])).contains("English"));
-        // Unknown codes are passed through; no languages at all means English.
-        assert!(build_system_prompt("balanced", true, &strings(&["de"])).contains("dictates in de."));
-        assert!(build_system_prompt("balanced", true, &[]).contains("dictates in English."));
+        assert!(build_system_prompt("balanced", true, &strings(&["de", "pl"])).contains("German or Polish"));
+        // Unknown codes are passed through; no languages at all means any.
+        assert!(build_system_prompt("balanced", true, &strings(&["xx"])).contains("dictates in xx."));
+        let any = build_system_prompt("balanced", true, &[]);
+        assert!(any.contains("may dictate in any language"), "{any}");
+        assert!(any.contains("SAME language"));
     }
 
     #[test]

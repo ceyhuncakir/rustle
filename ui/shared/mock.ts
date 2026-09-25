@@ -69,7 +69,7 @@ const config: Config = {
     style: "balanced",
     resolve_intent: true,
     think: "never",
-    languages: ["en", "nl"],
+    languages: [],
     output_language: "same",
     dictionary: [],
     app_rules: {},

@@ -5,7 +5,7 @@
 # eating a second request that merely sounded like a correction.
 #
 # Eight "real:" cases are verbatim from dictations where the failure
-# actually showed up; four are Dutch.
+# actually showed up; four are Dutch, and five more languages follow them.
 
 # Injected with --profile, to check that personalisation does not cost
 # accuracy (prompt length has regressed cases before).
@@ -177,6 +177,38 @@ name = "dutch keeps its casual register"
 raw = "Ja joh, het werkt gewoon perfect, ik ben echt zo blij hiermee man."
 must = ["ja joh", "perfect"]
 must_not = ["yeah", "it works"]
+
+# The recogniser knows 25 languages and the cleanup must keep each one:
+# the same drift into English that Dutch showed, checked in five more.
+[[case]]
+name = "german stays german, fillers removed"
+raw = "also ähm ich wollte nur sagen dass das Meeting morgen um zehn Uhr ist und äh wir brauchen noch die Folien"
+must = ["meeting", "morgen", "folien"]
+must_not = ["tomorrow", "slides", "ähm", " äh "]
+
+[[case]]
+name = "french stays french, fillers removed"
+raw = "euh est-ce que tu peux euh regarder le le ticket avant la réunion de demain"
+must = ["ticket", "réunion", "demain"]
+must_not = ["meeting", "tomorrow", "euh", "le le"]
+
+[[case]]
+name = "spanish stays spanish"
+raw = "bueno eh creo que deberíamos mover la reunión al jueves porque el cliente no puede el miércoles"
+must = ["reunión", "jueves", "miércoles"]
+must_not = ["meeting", "thursday", "wednesday"]
+
+[[case]]
+name = "italian stays italian, fillers removed"
+raw = "allora ehm dobbiamo ehm aggiornare la documentazione prima del rilascio di venerdì"
+must = ["documentazione", "rilascio", "venerdì"]
+must_not = ["documentation", "release", "friday", "ehm"]
+
+[[case]]
+name = "polish stays polish"
+raw = "no więc yyy chciałbym żebyś sprawdził ten raport przed piątkiem"
+must = ["raport", "piątk"]
+must_not = ["report", "friday", "yyy"]
 
 [[case]]
 name = "false start repaired"

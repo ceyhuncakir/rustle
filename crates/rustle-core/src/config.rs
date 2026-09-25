@@ -137,8 +137,9 @@ pub struct CleanupConfig {
     pub resolve_intent: bool,
     /// auto | never | always
     pub think: String,
+    /// The languages dictated in, as ISO 639-1 codes; empty means any.
     pub languages: Vec<String>,
-    /// same | en | nl
+    /// `same`, or the code of the language to translate into.
     pub output_language: String,
     pub dictionary: Vec<String>,
     /// App identifier -> instruction appended to the prompt for that app.
@@ -158,7 +159,7 @@ impl Default for CleanupConfig {
             style: "balanced".into(),
             resolve_intent: true,
             think: "never".into(),
-            languages: vec!["en".into(), "nl".into()],
+            languages: Vec::new(),
             output_language: "same".into(),
             dictionary: Vec::new(),
             app_rules: Default::default(),
@@ -400,14 +401,16 @@ resolve_intent = true
 # retraction cue; "always" reasons on everything.
 think = "never"
 
-# The languages you dictate in. The recogniser detects the language on its
-# own; this tells the cleanup model what to expect so it does not drift.
-languages = ["en", "nl"]
+# The languages you dictate in, as two-letter codes: ["de", "en"], say.
+# Empty means any of the 25 the recogniser knows, which detects the language
+# on its own. Naming yours helps the cleanup model keep a sentence in the
+# language it was spoken in, rather than drifting into English.
+#   bg cs da de el en es et fi fr hr hu it lt lv mt nl pl pt ro ru sk sl sv uk
+languages = []
 
 # What language to write out.
 #   same - whatever you spoke, cleaned up in that language
-#   en   - always English, translating your Dutch
-#   nl   - always Dutch, translating your English
+#   a code from the list above - always that language, translating the rest
 output_language = "same"
 
 # Names and jargon the recogniser keeps getting wrong.
@@ -629,7 +632,7 @@ mod tests {
         let cfg = parse("[cleanup]\nmodel = \"qwen3:8b\"\n");
         assert_eq!(cfg.cleanup.model, "qwen3:8b");
         assert_eq!(cfg.cleanup.backend, "ollama");
-        assert_eq!(cfg.cleanup.languages, vec!["en", "nl"]);
+        assert!(cfg.cleanup.languages.is_empty());
     }
 
     #[test]

@@ -11,10 +11,39 @@ const STYLES: readonly Choice[] = [
   { value: "tidy", label: "Tidy", description: "Also tightens loose phrasing" },
 ];
 
+// The languages the recogniser knows; the same list as LANGUAGES in
+// crates/rustle-core/src/cleanup.rs.
+const SPOKEN: readonly (readonly [string, string])[] = [
+  ["bg", "Bulgarian"],
+  ["hr", "Croatian"],
+  ["cs", "Czech"],
+  ["da", "Danish"],
+  ["nl", "Dutch"],
+  ["en", "English"],
+  ["et", "Estonian"],
+  ["fi", "Finnish"],
+  ["fr", "French"],
+  ["de", "German"],
+  ["el", "Greek"],
+  ["hu", "Hungarian"],
+  ["it", "Italian"],
+  ["lv", "Latvian"],
+  ["lt", "Lithuanian"],
+  ["mt", "Maltese"],
+  ["pl", "Polish"],
+  ["pt", "Portuguese"],
+  ["ro", "Romanian"],
+  ["ru", "Russian"],
+  ["sk", "Slovak"],
+  ["sl", "Slovenian"],
+  ["es", "Spanish"],
+  ["sv", "Swedish"],
+  ["uk", "Ukrainian"],
+];
+
 const LANGUAGES: readonly Choice[] = [
-  { value: "same", label: "Same as spoken", description: "Dutch stays Dutch, English stays English" },
-  { value: "en", label: "Always English", description: "Translates your Dutch" },
-  { value: "nl", label: "Always Dutch", description: "Translates your English" },
+  { value: "same", label: "Same as spoken", description: "Whatever language you speak stays that language" },
+  ...SPOKEN.map(([code, name]) => ({ value: code, label: `Always ${name}`, description: `Translates everything into ${name}` })),
 ];
 
 export function CleanupSection() {
