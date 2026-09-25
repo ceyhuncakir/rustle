@@ -54,14 +54,16 @@ export async function listen<T>(event: string, handler: Handler<T>): Promise<Unl
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const pinnedState = params.get("state");
 const pinnedText = params.get("text") ?? "";
+// `?backend=anthropic` previews a cloud provider in the wizard and settings.
+const pinnedBackend = params.get("backend");
 
 const config: Config = {
   audio: { device: "", sample_rate: 16000, silence_rms: 0.006, trim_silence: true, min_seconds: 0.35 },
   stt: { model: "nemo-parakeet-tdt-0.6b-v3", provider: "auto" },
   cleanup: {
     enabled: true,
-    backend: "ollama",
-    model: "qwen3:14b",
+    backend: pinnedBackend ?? "ollama",
+    model: pinnedBackend ? "" : "qwen3:14b",
     endpoint: "http://localhost:11434",
     base_url: "",
     timeout: 20,
@@ -204,7 +206,7 @@ const providerModels: Record<string, string[]> = {
 };
 
 const sttModels: Omit<SttModel, "downloaded" | "download_mb" | "precision">[] = [
-  { id: "nemo-parakeet-tdt-0.6b-v3", label: "Parakeet TDT v3", description: "English and Dutch, detected automatically" },
+  { id: "nemo-parakeet-tdt-0.6b-v3", label: "Parakeet TDT v3", description: "25 European languages, detected automatically" },
   { id: "nemo-parakeet-tdt-0.6b-v2", label: "Parakeet TDT v2", description: "English only, marginally better on English" },
 ];
 

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { api, type GpuReport } from "../../shared/api";
 import { detach, useAction, useAsync } from "../../shared/hooks";
-import { DownloadProgress, computePlan, formatMegabytes, useModelDownload } from "../../shared/prefs";
-import { Button } from "../../shared/ui";
+import { COMPUTE_CHOICES, DownloadProgress, computePlan, formatMegabytes, providerChoice, useModelDownload } from "../../shared/prefs";
+import { Button, Select, descriptionOf } from "../../shared/ui";
 import { useWizard } from "../context";
 import { Outcome, StepHeader } from "./StepHeader";
 
@@ -29,7 +29,8 @@ function ComputeCard({ gpu, provider, error }: { gpu: GpuReport | null; provider
 
 export function ModelStep() {
   const { config, save } = useWizard();
-  const models = useAsync(() => api.listSttModels());
+  // Which files a model needs, and so its size, depends on where it runs.
+  const models = useAsync(() => api.listSttModels(), [config.stt.provider]);
   const gpu = useAsync(() => api.detectGpu());
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const download = useModelDownload({ onDone: () => void models.reload(), onError: setDownloadError });
@@ -40,8 +41,21 @@ export function ModelStep() {
 
   return (
     <div>
-      <StepHeader title="Recognition model" lead="Speech is recognised on this machine by a model downloaded once. Pick one, fetch it, then try a sentence." />
+      <StepHeader title="Recognition model" lead="Speech is recognised on this machine by a model downloaded once. Pick one and where it runs, fetch it, then try a sentence." />
       <ComputeCard gpu={gpu.data} provider={config.stt.provider} error={gpu.error} />
+      <div className="card mb-4 flex items-center gap-4 px-4 py-3">
+        <span className="min-w-0 flex-1">
+          <span className="block text-[14px] font-medium">Runs on</span>
+          <span className="block text-[12.5px] text-fg-2">{descriptionOf(COMPUTE_CHOICES, providerChoice(config.stt.provider))}</span>
+        </span>
+        <Select
+          label="Runs on"
+          value={providerChoice(config.stt.provider)}
+          options={COMPUTE_CHOICES}
+          disabled={downloading}
+          onChange={(v) => detach(save("stt", "provider", v))}
+        />
+      </div>
       <ul role="radiogroup" aria-label="Recognition model" className="card divide-y divide-line">
         {(models.data ?? []).map((m) => {
           const active = m.id === config.stt.model;

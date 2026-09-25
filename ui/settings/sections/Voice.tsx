@@ -1,14 +1,8 @@
 import { api, type ComputeReport, type GpuReport } from "../../shared/api";
 import { detach, useAsync, useInterval } from "../../shared/hooks";
-import { DownloadProgress, computePlan, deviceOptions, formatMegabytes, providerChoice, useModelDownload } from "../../shared/prefs";
-import { Button, ChoiceRow, Group, Row, Select, descriptionOf, useToast, type Choice, type Option } from "../../shared/ui";
+import { COMPUTE_CHOICES, DownloadProgress, computePlan, deviceOptions, formatMegabytes, providerChoice, useModelDownload } from "../../shared/prefs";
+import { Button, ChoiceRow, Group, Row, Select, descriptionOf, useToast, type Option } from "../../shared/ui";
 import { useSettings } from "../context";
-
-const COMPUTE: readonly Choice[] = [
-  { value: "auto", label: "Automatic", description: "Use the graphics card when it is faster than the CPU" },
-  { value: "gpu", label: "GPU only", description: "Use the graphics card even when it is slower, and fail without one" },
-  { value: "cpu", label: "CPU only", description: "Slower, but leaves the graphics card free" },
-];
 
 /** What runs now once the model is loaded; before that, what will. */
 function computeSubtitle(report: ComputeReport | null, gpu: GpuReport | null, requested: string): string {
@@ -18,7 +12,7 @@ function computeSubtitle(report: ComputeReport | null, gpu: GpuReport | null, re
   }
   if (report?.actual === "cpu") return report.reason ? `Running on the CPU - ${report.reason}` : "Running on the CPU";
   if (gpu) return computePlan(gpu, requested).headline;
-  return descriptionOf(COMPUTE, providerChoice(requested));
+  return descriptionOf(COMPUTE_CHOICES, providerChoice(requested));
 }
 
 export function VoiceSection() {
@@ -84,7 +78,7 @@ export function VoiceSection() {
       <ChoiceRow
         id="compute"
         title="Runs on"
-        choices={COMPUTE}
+        choices={COMPUTE_CHOICES}
         subtitle={computeSubtitle(compute.data, gpu.data, config.stt.provider)}
         below={fix && <p className="selectable mt-2 text-[12.5px] text-fg-2">To use the graphics card: {fix}</p>}
         value={providerChoice(config.stt.provider)}

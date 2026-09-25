@@ -19,7 +19,7 @@ pub const STT_MODELS: &[SttModel] = &[
     SttModel {
         id: "nemo-parakeet-tdt-0.6b-v3",
         label: "Parakeet TDT v3",
-        description: "English and Dutch, detected automatically",
+        description: "25 European languages, detected automatically",
         repo: "istupakov/parakeet-tdt-0.6b-v3-onnx",
     },
     SttModel {

@@ -48,16 +48,20 @@ Until the releases are code-signed, both systems warn the first time:
 A short setup wizard walks you through it:
 
 1. **Microphone.** Pick one and check that the level meter moves.
-2. **Speech model.** Rustle downloads it once: about 670 MB, or 2.5 GB for
-   the version that runs on a graphics card. An interrupted download picks
-   up where it stopped.
+2. **Speech model.** Pick the model (Parakeet v3 for 25 languages, or v2 for
+   English only) and whether it runs on the CPU or the graphics card. It
+   downloads once: about 670 MB for the CPU, 2.5 GB for the graphics card.
+   An interrupted download picks up where it stopped.
 3. **Shortcut.** Press the one you want, or keep the default.
 4. **Paste test.** Rustle types into a test field, so you know it can reach
    your other apps. On macOS this is where it asks for Accessibility access.
-5. **Cleanup.** Choose a local model, a cloud provider, or none (see
-   [Cleanup](#cleanup)).
+5. **Cleanup.** Choose where it runs (Ollama on your machine, a cloud
+   provider, or not at all) and which model: any model you have in Ollama or
+   your provider offers, or type one in (see [Cleanup](#cleanup)).
 
-Then hold the shortcut, speak, and let go.
+Then hold the shortcut, speak, and let go. Everything the wizard sets can
+be changed later in the settings window: the speech model and where it
+runs under Voice, the cleanup provider and model under Cleanup.
 
 ## Using it
 
@@ -98,12 +102,15 @@ resolves a change of mind ("ship it Monday, no wait, Tuesday" becomes
 It runs where you choose:
 
 - **Locally, through [Ollama](https://ollama.com).** Nothing leaves your
-  machine. Install Ollama, run `ollama pull qwen3:14b` (or a smaller model
-  such as `qwen3:8b` if memory is tight), and pick it in the wizard. On
+  machine. Install Ollama, pull a model, and pick it from the list: any
+  model you have pulled works. `qwen3:14b` is the one the cleanup is tuned
+  and tested against; `qwen3:8b` is a smaller choice if memory is tight. On
   Linux, `scripts/install-ollama.sh` sets up a rootless Ollama for you.
 - **With a cloud provider:** Anthropic, OpenAI, OpenRouter, DeepSeek, or any
   OpenAI-compatible endpoint, including local servers such as llama.cpp and
-  LM Studio. API keys are kept in your system's keychain, never in a file.
+  LM Studio. Pick a model from the provider's own list, or type any model
+  name it serves. API keys are kept in your system's keychain, never in a
+  file.
 - **Not at all**, if you want the raw transcript.
 
 ## Privacy

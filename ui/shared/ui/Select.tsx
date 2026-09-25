@@ -10,15 +10,17 @@ interface SelectProps<V extends string> {
   onChange: (value: V) => void;
   id?: string;
   label?: string;
+  disabled?: boolean;
 }
 
 /** A native select in the app's clothing: keyboard, screen reader and OS popup for free. */
-export function Select<V extends string>({ value, options, onChange, id, label }: SelectProps<V>) {
+export function Select<V extends string>({ value, options, onChange, id, label, disabled }: SelectProps<V>) {
   return (
     <select
       id={id}
       aria-label={label}
       value={value}
+      disabled={disabled}
       onChange={(e) => onChange(e.target.value as V)}
       className="control select h-8 max-w-[280px] cursor-default truncate text-[13.5px]"
     >

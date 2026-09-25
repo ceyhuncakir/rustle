@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { api } from "../../shared/api";
 import { detach, plural, useAction, useAsync } from "../../shared/hooks";
-import { useApiKey } from "../../shared/prefs";
-import { Button, Select, TextField } from "../../shared/ui";
+import { useApiKey, useProviderModels } from "../../shared/prefs";
+import { Button, Combobox, Select, TextField } from "../../shared/ui";
 import { useWizard } from "../context";
 import { Outcome, StepHeader } from "./StepHeader";
 
@@ -26,6 +26,8 @@ export function CleanupStep() {
 
   const cloud = (providers.data ?? []).filter((p) => p.needs_api_key);
   const spec = providers.data?.find((p) => p.key === cloudKey) ?? null;
+  // Only asked once a cloud provider is chosen; most list nothing without a key.
+  const cloudModels = useProviderModels(choice === "cloud" ? cloudKey : "none", spec?.suggested_models ?? [], config.cleanup.model);
 
   const pick = async (next: Choice, provider?: string) => {
     setChoice(next);
@@ -48,6 +50,27 @@ export function CleanupStep() {
 
   const installed = ollama.data?.length ?? 0;
 
+  // Any model the provider has, or any name typed in: the pick above only
+  // chooses a sensible default.
+  const modelField = (options: string[], loading: boolean) => (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-[13.5px]">Model</span>
+      <Combobox
+        label="Cleanup model"
+        className="w-[260px]"
+        value={config.cleanup.model}
+        options={options}
+        loading={loading}
+        placeholder="Type to search"
+        onChange={(v) => {
+          if (!v || v === config.cleanup.model) return;
+          test.reset();
+          detach(save("cleanup", "model", v));
+        }}
+      />
+    </div>
+  );
+
   const option = (value: Choice, title: ReactNode, subtitle: ReactNode, body?: ReactNode) => (
     <li>
       <label className="flex cursor-default items-start gap-3 px-4 py-3">
@@ -65,7 +88,7 @@ export function CleanupStep() {
     <div>
       <StepHeader
         title="Cleanup"
-        lead="A language model turns the raw transcript into what you meant: punctuation, dropped fillers, resolved changes of mind. Choose where it runs."
+        lead="A language model turns the raw transcript into what you meant: punctuation, dropped fillers, resolved changes of mind. Choose where it runs and which model."
       />
       <ul role="radiogroup" aria-label="Cleanup provider" className="card divide-y divide-line">
         {option("none", "None", "Paste the transcript exactly as recognised.")}
@@ -80,6 +103,7 @@ export function CleanupStep() {
             : ollama.loading
               ? "Checking for a local Ollama…"
               : "Not running. Install it from ollama.com and pull a model such as qwen3:14b, then come back.",
+          installed > 0 && modelField(ollama.data ?? [], ollama.loading),
         )}
         {option(
           "cloud",
@@ -101,7 +125,14 @@ export function CleanupStep() {
             {spec?.has_base_url && (
               <div>
                 <div className="mb-1 text-[13.5px]">API address</div>
-                <TextField value={config.cleanup.base_url} placeholder="https://api.groq.com/openai/v1" onApply={(v) => save("cleanup", "base_url", v.trim())} />
+                <TextField
+                  value={config.cleanup.base_url}
+                  placeholder="https://api.groq.com/openai/v1"
+                  onApply={async (v) => {
+                    await save("cleanup", "base_url", v.trim());
+                    void cloudModels.refresh();
+                  }}
+                />
               </div>
             )}
             <div>
@@ -110,9 +141,21 @@ export function CleanupStep() {
                 {apiKey.fromEnv && <span className="ml-2 text-[12.5px] text-fg-2">using {apiKey.source}</span>}
                 {apiKey.source === "keyring" && <span className="ml-2 text-[12.5px] text-success">saved</span>}
               </div>
-              {!apiKey.fromEnv && <TextField key={cloudKey} value="" secret clearOnApply placeholder="Paste the key" onApply={apiKey.apply} />}
+              {!apiKey.fromEnv && (
+                <TextField
+                  key={cloudKey}
+                  value=""
+                  secret
+                  clearOnApply
+                  placeholder="Paste the key"
+                  onApply={async (key) => {
+                    if (await apiKey.apply(key)) void cloudModels.refresh();
+                  }}
+                />
+              )}
               {apiKey.error && <p className="selectable mt-1.5 text-[12.5px] text-danger">{apiKey.error}</p>}
             </div>
+            {modelField(cloudModels.choices, cloudModels.fetching)}
             {spec?.note && <p className="text-[12.5px] text-fg-2">{spec.note}</p>}
           </div>,
         )}

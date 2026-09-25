@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Config, type ConfigSection, type ConfigValue, type DownloadEvent, type GpuReport, type InputDevice } from "./api";
 import { describe, useAsync, useEvent } from "./hooks";
-import { Button, Progress, Switch, formatBytes, useToast, type Option } from "./ui";
+import { Button, Progress, Switch, formatBytes, useToast, type Choice, type Option } from "./ui";
 
 // -- config ------------------------------------------------------------------
 
@@ -106,7 +106,51 @@ export function useApiKey(provider: string | null) {
   return { source, fromEnv: source.startsWith("$"), error, apply };
 }
 
+// -- cleanup models -------------------------------------------------------------
+
+/**
+ * The models a cleanup provider offers: its suggestions at once, then its own
+ * list once it answers (OpenRouter alone offers hundreds, so no hardcoded list
+ * stays right). The configured model is always among the choices, and any
+ * other name can still be typed.
+ */
+export function useProviderModels(provider: string, suggested: readonly string[], current: string) {
+  const [fetched, setFetched] = useState<string[] | null>(null);
+  const [fetching, setFetching] = useState(false);
+  // A slow answer for a provider the user has since left must not win.
+  const asked = useRef(0);
+
+  const refresh = async () => {
+    const id = ++asked.current;
+    setFetched(null);
+    if (provider === "none") return;
+    setFetching(true);
+    try {
+      const found = await api.listProviderModels(provider);
+      if (id === asked.current) setFetched(found.length ? found : null);
+    } catch (err) {
+      console.warn("list_provider_models failed", err);
+    } finally {
+      if (id === asked.current) setFetching(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [provider]);
+
+  const list = fetched ?? [...suggested];
+  const choices = current && !list.includes(current) ? [current, ...list] : list;
+  return { choices, fetched, fetching, refresh };
+}
+
 // -- where recognition runs ---------------------------------------------------
+
+export const COMPUTE_CHOICES: readonly Choice[] = [
+  { value: "auto", label: "Automatic", description: "Use the graphics card when it is faster than the CPU" },
+  { value: "gpu", label: "GPU only", description: "Use the graphics card even when it is slower, and fail without one" },
+  { value: "cpu", label: "CPU only", description: "Slower, but leaves the graphics card free and needs the smaller download" },
+];
 
 export interface ComputePlan {
   /** Whether the encoder will run on the graphics card. */

@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
 import { api } from "../../shared/api";
 import { detach, useAsync } from "../../shared/hooks";
-import { useApiKey } from "../../shared/prefs";
+import { useApiKey, useProviderModels } from "../../shared/prefs";
 import { ChoiceRow, Combobox, Group, Row, Select, TextField, type Choice } from "../../shared/ui";
 import { useSettings } from "../context";
 
@@ -53,33 +52,10 @@ export function CleanupSection() {
   const spec = providers.data?.find((p) => p.key === provider) ?? null;
   const apiKey = useApiKey(provider);
 
-  const [fetched, setFetched] = useState<string[] | null>(null);
-  const [fetching, setFetching] = useState(false);
-
-  // Show something immediately, then replace it with the provider's own list
-  // once it answers: OpenRouter alone offers hundreds, no hardcoded list stays right.
-  const fetchModels = async () => {
-    setFetched(null);
-    if (provider === "none") return;
-    setFetching(true);
-    try {
-      const found = await api.listProviderModels(provider);
-      setFetched(found.length ? found : null);
-    } catch (err) {
-      console.warn("list_provider_models failed", err);
-    } finally {
-      setFetching(false);
-    }
-  };
-
-  useEffect(() => {
-    void fetchModels();
-  }, [provider]);
+  const models = useProviderModels(provider, spec?.suggested_models ?? [], config.cleanup.model);
+  const { fetched, fetching } = models;
 
   const showKey = Boolean(spec?.needs_api_key) && !apiKey.fromEnv;
-
-  const suggested = fetched ?? spec?.suggested_models ?? [];
-  const modelChoices = config.cleanup.model && !suggested.includes(config.cleanup.model) ? [config.cleanup.model, ...suggested] : suggested;
 
   const modelSubtitle = fetched
     ? `${fetched.length} available ${provider === "ollama" ? "locally" : "from this provider"}`
@@ -113,7 +89,7 @@ export function CleanupSection() {
             placeholder="https://api.groq.com/openai/v1"
             onApply={async (v) => {
               await save("cleanup", "base_url", v.trim());
-              void fetchModels();
+              void models.refresh();
             }}
           />
         </Row>
@@ -125,7 +101,7 @@ export function CleanupSection() {
             label="Model"
             className="w-[280px]"
             value={config.cleanup.model}
-            options={modelChoices}
+            options={models.choices}
             loading={fetching}
             placeholder="Type to search"
             onChange={(v) => {
@@ -149,7 +125,7 @@ export function CleanupSection() {
             clearOnApply
             placeholder={apiKey.source === "keyring" ? "••••••••••••" : "Paste the key"}
             onApply={async (key) => {
-              if (await apiKey.apply(key)) void fetchModels();
+              if (await apiKey.apply(key)) void models.refresh();
             }}
           />
         </Row>
