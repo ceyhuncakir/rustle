@@ -1,281 +1,334 @@
 # Rustle
 
-Local, offline dictation: hold a key, talk, and cleaned-up text appears in
-whatever app you are in, with a floating island showing what is happening.
+**Hold a key, speak, and clean text appears wherever you are typing.**
+Rustle is a private dictation app for Windows, macOS and Linux. Your voice
+is turned into text on your own computer, in any of 25 languages, and a
+cleanup pass makes it read as if you had typed it: punctuation, no "um"s,
+changes of mind resolved.
 
-Recognition runs on your machine (NVIDIA Parakeet TDT 0.6B v3, English and
-Dutch, detected automatically). A cleanup pass turns the raw transcript into
-text worth pasting: punctuation, filler removal, self-corrections resolved,
-per-app tone. That pass runs on a local model through Ollama, on a cloud
-provider of your choice, or not at all.
-
-| | |
-|---|---|
-| Floating island | Renders above every window, never takes focus or eats a click |
-| Push-to-talk | One shortcut gives both hold-to-talk and tap-to-toggle |
-| Recognition | Parakeet TDT v3 on onnxruntime, on the CPU or any graphics card: ~40x realtime on a CPU, ~140x on an RTX 4090 |
-| Cleanup | Local Qwen3 via Ollama, or Anthropic / OpenAI / OpenRouter / DeepSeek / any OpenAI-compatible endpoint |
-| Focus context | The focused app's identity and title feed the cleanup model, so tone adapts per app |
-| Learning | Optional, off by default: picks up your jargon and register over time |
-| Settings | A preferences window, a first-run wizard, and a tray icon |
-| Diagnostics | `rustle doctor` checks every moving part and says what is wrong |
-
-## Status
-
-The Rust + Tauri version replaces the earlier Python daemon. What is verified
-where:
-
-| Platform | State |
-|---|---|
-| Linux, GNOME Wayland | **Works.** The Shell extension draws the island and delivers the hotkey; the app talks to it over D-Bus. Daily-driver tested. |
-| Linux, X11 | Built, not yet verified on a real session. GNOME on X11 uses the extension when it runs. |
-| Linux, KDE / Hyprland / other Wayland | Built. The shortcut comes from the desktop's shortcut portal (tried on GNOME's) or from compositor key bindings; the island is a layer-shell overlay (tried in sway); pasting needs `dotool` or `ydotool`. Not yet verified on a real KDE or wlroots session. |
-| Windows | Built through CI, not yet verified on a machine. The island stays on top without taking focus. |
-| macOS | Built through CI, not yet verified on a machine. The island is a non-activating panel; the wizard checks and requests Accessibility. |
-
-Every crate's tests, the recognition parity suite and the 28-case cleanup
-evaluation pass on the Linux development machine.
+- **Private by default.** Speech recognition runs locally. Nothing you say
+  leaves the machine unless you choose a cloud model for the cleanup.
+- **25 languages, detected on their own.** Switch languages whenever you
+  like without touching a setting; the text comes out in the language you
+  spoke.
+- **Works in every app.** Editors, browsers, chat, terminals. A small island
+  at the bottom of the screen shows when it is listening, thinking and done.
+- **Fast.** A five-second dictation is recognised in about a tenth of a
+  second on a desktop CPU, and faster still on a graphics card.
+- **Free and open source**, MIT licensed.
 
 ## Install
 
-### Linux, GNOME (today)
+Download the installer for your system from the
+[latest release](https://github.com/ceyhuncakir/rustle/releases/latest):
+
+| System | File | |
+|---|---|---|
+| **Windows** 10 and 11 | `Rustle_…_x64-setup.exe` | Installs for your user; no admin rights needed |
+| **macOS** 12 or later, Apple Silicon | `Rustle_…_aarch64.dmg` | Drag Rustle into Applications |
+| **Linux** | `Rustle_…_amd64.AppImage` | Runs anywhere; updates itself |
+| Debian, Ubuntu | `Rustle_…_amd64.deb` | `sudo apt install ./Rustle_…_amd64.deb` |
+| Fedora, openSUSE | `Rustle-…x86_64.rpm` | `sudo dnf install ./Rustle-…x86_64.rpm` |
+
+Intel Macs are not supported: the speech engine no longer ships for them.
+
+<details>
+<summary><b>"Unidentified developer" or "Windows protected your PC"?</b></summary>
+
+Until the releases are code-signed, both systems warn the first time:
+
+- **macOS:** right-click Rustle in Applications and choose **Open**, then
+  **Open** again. Or run `xattr -dr com.apple.quarantine /Applications/Rustle.app`.
+- **Windows:** click **More info**, then **Run anyway**.
+
+</details>
+
+### First launch
+
+A short setup wizard walks you through it:
+
+1. **Microphone.** Pick one and check that the level meter moves.
+2. **Speech model.** Rustle downloads it once: about 670 MB, or 2.5 GB for
+   the version that runs on a graphics card. An interrupted download picks
+   up where it stopped.
+3. **Shortcut.** Press the one you want, or keep the default.
+4. **Paste test.** Rustle types into a test field, so you know it can reach
+   your other apps. On macOS this is where it asks for Accessibility access.
+5. **Cleanup.** Choose a local model, a cloud provider, or none (see
+   [Cleanup](#cleanup)).
+
+Then hold the shortcut, speak, and let go.
+
+## Using it
+
+| | |
+|---|---|
+| **Hold** the shortcut | Records while held, and pastes when you let go |
+| **Tap** the shortcut | Starts recording; tap again to stop |
+| Default shortcut | **Ctrl+Alt+Space**; **Option+D** on a Mac; **Super+D** on GNOME |
+| Cancel a take | **Super+Ctrl+Escape** on GNOME |
+
+The tray icon opens the settings window, where you can change the
+shortcut, the microphone, the cleanup model and everything else.
+
+### Languages
+
+Rustle recognises these 25 languages and works out which one you are
+speaking, dictation by dictation:
+
+Bulgarian, Croatian, Czech, Danish, Dutch, English, Estonian, Finnish,
+French, German, Greek, Hungarian, Italian, Latvian, Lithuanian, Maltese,
+Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish
+and Ukrainian.
+
+The cleanup keeps each dictation in the language it was spoken in. To
+always write in one language instead, pick it under Settings → Cleanup →
+Output language, and Rustle translates the rest. If you mostly speak one
+or two languages, naming them in the config file (`languages = ["de",
+"en"]`) helps the cleanup model stay on track.
+
+## Cleanup
+
+Recognition turns your voice into words; the cleanup pass decides what you
+meant by them. It adds punctuation and paragraphs, removes fillers and
+false starts, puts spoken URLs and email addresses back together, and
+resolves a change of mind ("ship it Monday, no wait, Tuesday" becomes
+"Ship it Tuesday."). It never answers or acts on what you dictated.
+
+It runs where you choose:
+
+- **Locally, through [Ollama](https://ollama.com).** Nothing leaves your
+  machine. Install Ollama, run `ollama pull qwen3:14b` (or a smaller model
+  such as `qwen3:8b` if memory is tight), and pick it in the wizard. On
+  Linux, `scripts/install-ollama.sh` sets up a rootless Ollama for you.
+- **With a cloud provider:** Anthropic, OpenAI, OpenRouter, DeepSeek, or any
+  OpenAI-compatible endpoint, including local servers such as llama.cpp and
+  LM Studio. API keys are kept in your system's keychain, never in a file.
+- **Not at all**, if you want the raw transcript.
+
+## Privacy
+
+- The microphone records only while you hold, or have tapped, the
+  shortcut, and the audio is never written to disk.
+- Speech recognition always runs on your computer.
+- Transcripts go to a cloud provider only if you chose one for the cleanup.
+- Rustle keeps no record of what you say unless you switch learning on
+  (below), and what you dictate never appears in its logs.
+- Apart from the provider you choose, Rustle goes online only to download
+  the speech model once and to check for updates daily, which you can turn
+  off.
+
+## Speed and graphics cards
+
+Recognition runs on the CPU, or on the graphics card when that is faster:
+
+- **CPU:** about 40 times faster than real time on a desktop processor.
+- **Graphics card:** about 140 times real time on an RTX 4090. AMD, Intel
+  Arc and NVIDIA cards work through Vulkan on Linux and Direct3D 12 on
+  Windows, and Macs use their built-in GPU. Cards need 4 GB of memory.
+  Graphics built into a PC's processor are left alone, because the CPU is
+  faster there.
+
+Recognition is the quick part. Most of the wait after you let go is the
+cleanup model, so a smaller or faster model there makes the biggest
+difference. `rustle gpu` shows which card was found and what Rustle will
+use.
+
+## Linux notes
+
+Rustle works on GNOME, KDE, Hyprland, sway and other desktops, on Wayland
+and X11. Some desktops need a little help:
+
+- **GNOME** gives no ordinary app a way to float above other windows or to
+  paste into them, so Rustle comes with a GNOME Shell extension that does
+  both. The setup wizard installs it; log out and back in once so GNOME
+  loads it.
+- **KDE and Hyprland** ask you to confirm the shortcut once, in their own
+  dialog.
+- **sway, river and niri** have no shortcut dialog, so bind a key in the
+  compositor to `rustle hotkey`:
+
+  ```sh
+  # sway: hold to talk
+  bindsym --no-repeat Ctrl+Alt+space exec rustle hotkey down
+  bindsym --release Ctrl+Alt+space exec rustle hotkey up
+  # Hyprland
+  bind = CTRL ALT, space, exec, rustle hotkey down
+  bindr = CTRL ALT, space, exec, rustle hotkey up
+  # river
+  riverctl map normal Control+Alt Space spawn 'rustle hotkey down'
+  riverctl map -release normal Control+Alt Space spawn 'rustle hotkey up'
+  # niri (press only, so tap to start and tap to stop)
+  Mod+Space repeat=false { spawn "rustle" "hotkey" "toggle"; }
+  ```
+
+  `rustle hotkey cancel` drops the take in progress.
+- **On Wayland outside GNOME**, pasting needs `dotool`, or `ydotool` with
+  its `ydotoold` service running; the setup wizard checks for one. The
+  island needs `gtk-layer-shell` to float above windows
+  (`libgtk-layer-shell0` on Debian and Ubuntu) and falls back to a plain
+  window without it.
+
+On GNOME you can also run Rustle without any window, as a background
+service: `systemctl --user enable --now rustle`. Only one copy dictates at a
+time.
+
+### Build from source
 
 ```sh
 git clone https://github.com/ceyhuncakir/rustle && cd rustle
-scripts/install-app.sh            # builds, installs ~/.local/bin/rustle, the service, the extension
+scripts/install-app.sh      # builds and installs ~/.local/bin/rustle, the service and the GNOME extension
 ```
 
-Recognition runs on the graphics card when that is faster: AMD, Intel Arc
-and NVIDIA cards through WebGPU on Vulkan, which needs nothing beyond the
-graphics driver (on Fedora, `mesa-vulkan-drivers` for AMD and Intel). A card
-built into the processor is left alone, because the CPU is faster there (an
-Intel UHD 770 managed 6x realtime against the CPU's 36x); pick "GPU only" in
-the settings to use it anyway. Cards need 4 GB of memory. `rustle gpu` shows
-what was found and what it will use.
+It needs [rustup](https://rustup.rs) (the Rust version in
+`rust-toolchain.toml` is fetched for you), Node.js with pnpm, and your
+distribution's WebKitGTK development packages. `--cuda` builds for NVIDIA's
+CUDA instead of WebGPU: slightly faster on recognition, but it needs CUDA 12
+and cuDNN 9. `--cpu` leaves the GPU out.
 
-On NVIDIA, `scripts/install-app.sh --cuda` builds for CUDA instead: about 20%
-faster on recognition, which is a few milliseconds per dictation, but it
-needs CUDA 12 and cuDNN 9 and covers the RTX 20 to 40 series only. Rustle finds
-those libraries on the loader path, under `/usr/local/cuda` and in pip's
-`nvidia-*` wheels (`pip install --user nvidia-cudnn-cu12`). `--cpu` leaves
-the GPU out.
+## Settings and the config file
 
-Log out and back in once so GNOME loads the extension (Wayland cannot
-hot-load one). The deb, rpm and AppImage carry the extension too; the setup
-wizard installs it for you, and the same log-out applies. Then either:
+The settings window covers the everyday options. Everything is also in a
+commented `config.toml`, which the settings window edits in place:
 
-```sh
-systemctl --user start rustle       # headless: the extension is the whole UI
-rustle                              # or the tray app with the settings window and wizard
-```
+| System | Config | Models and history |
+|---|---|---|
+| Linux | `~/.config/rustle` | `~/.local/share/rustle` |
+| macOS | `~/Library/Application Support/rustle` | the same folder |
+| Windows | `%APPDATA%\rustle` | `%LOCALAPPDATA%\rustle` |
 
-Only one of them dictates at a time; the second says so and leaves the
-shortcut to the first.
+The parts worth knowing:
 
-Press **Super+D** and talk. Hold it and it stops when you let go; tap it and
-it stops on the next tap. **Super+Ctrl+Escape** cancels. Elsewhere the
-shortcut is **Ctrl+Alt+Space** (**Option+D** on a Mac), and the settings
-window changes it on every desktop.
+- `[cleanup] dictionary`: names and jargon the recogniser keeps getting
+  wrong.
+- `[cleanup.app_rules]`: a tone per app, keyed by the name `rustle context`
+  prints with that app focused.
+- `[cleanup] style`: `light`, `balanced` or `tidy`.
+- `[cleanup] languages` and `output_language`: see [Languages](#languages).
+- `[stt] provider`: `auto` uses the graphics card when it is faster, `gpu`
+  insists, `cpu` never tries.
 
-Cleanup is optional. For the local model, install Ollama and pull one:
+A value that does not fit is skipped on its own, and `rustle doctor` says
+which.
 
-```sh
-scripts/install-ollama.sh         # rootless Ollama + qwen3:14b
-```
+## Learning your vocabulary
 
-or pick a cloud provider in the settings window. API keys go in the system
-keyring, never in the config file.
-
-### KDE, Hyprland, sway and other Wayland desktops
-
-The app asks the desktop's shortcut portal for the dictation shortcut; KDE
-and Hyprland show their own dialog to confirm it once, and the key you
-pick there is the one Rustle shows. Where the portal has no shortcuts
-(sway, river, niri), bind keys in the compositor to `rustle hotkey`, which
-talks to the running app:
-
-```sh
-# sway: hold to talk
-bindsym --no-repeat Ctrl+Alt+space exec rustle hotkey down
-bindsym --release Ctrl+Alt+space exec rustle hotkey up
-# Hyprland
-bind = CTRL ALT, space, exec, rustle hotkey down
-bindr = CTRL ALT, space, exec, rustle hotkey up
-# river
-riverctl map normal Control+Alt Space spawn 'rustle hotkey down'
-riverctl map -release normal Control+Alt Space spawn 'rustle hotkey up'
-# niri (press only, so tap to start and tap to stop)
-Mod+Space repeat=false { spawn "rustle" "hotkey" "toggle"; }
-```
-
-`rustle hotkey cancel` drops the take in progress. The island needs
-`gtk-layer-shell` (`libgtk-layer-shell0` on Debian and Ubuntu) to float
-above windows without taking focus; without it Rustle uses a plain window.
-Pasting needs `dotool`, or `ydotool` with its `ydotoold` service running.
-
-### Windows and macOS
-
-Installers are produced by the release workflow. They are not yet verified on
-real machines; treat them as previews until the platform milestones below are
-done. They recognise speech on the GPU through WebGPU: Direct3D 12 on
-Windows, and on the Mac the Apple Silicon GPU through Metal. Intel Macs are
-not supported, because ONNX Runtime no longer ships for them.
-
-## Why it is built this way
-
-GNOME on Wayland rules out the obvious designs, so the split is forced:
-
-- **Mutter has no `wlr-layer-shell`.** No ordinary client can place an
-  always-on-top, click-through overlay. On GNOME the island therefore lives
-  *inside* the Shell as an extension. Elsewhere the app draws it in a window
-  of its own.
-- **`wtype` does not work on GNOME.** It needs `zwp_virtual_keyboard_v1`,
-  which Mutter does not expose. KDE does not either.
-- **`ydotool` needs root.** It writes to `/dev/uinput`.
-- **Only the Shell can see the focused window** on Wayland, and that context
-  is exactly what lets the cleanup model adapt its tone per app.
-
-```
-┌─ GNOME Shell extension (GJS, in Mutter's process) ────────────────┐
-│  island UI · focus context · text injection · hotkeys             │
-└──────────────────── dev.ceyhun.Rustle.Island (session bus) ─────────────────┘
-┌─ rustle (Rust + Tauri) ─────────────────────────────────────────────┐
-│  engine · audio capture · Parakeet on onnxruntime · cleanup pass  │
-│  tray · settings window · first-run wizard                        │
-│  per-desktop backends: GNOME (D-Bus) · Windows · macOS · X11 ·    │
-│  Wayland (layer-shell + paste helpers)                            │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-The engine is one state machine driven by a channel, with every platform
-concern behind a trait, so the whole dictation path is tested with fakes.
-
-## Layout
-
-```
-crates/rustle-core/      engine, cleanup prompts and passes, providers, config, history, learning, secrets
-crates/rustle-audio/     microphone capture (cpal + rubato)
-crates/rustle-stt/       Parakeet TDT on onnxruntime (ort), model download, parity tests
-crates/rustle-desktop/   overlay / hotkey / focus / paste per desktop; GNOME over D-Bus
-src-tauri/             the app: tray, windows, settings commands, CLI subcommands
-ui/                    overlay pill (canvas), settings and first-run (React)
-extension/             the GNOME Shell extension
-eval/cases.toml        the cleanup evaluation cases (`rustle eval`)
-tests/fixtures/stt/    recognition parity goldens (WAVs regenerate from scripts/stt-golden.py)
-docs/qa-checklist.md   the per-platform manual checklist
-flowd/, tests/*.py     the previous Python implementation, kept until the GNOME path has been the daily driver for a while
-```
+Off by default. Switched on (Settings → Learning, or `rustle learning on`),
+Rustle keeps your dictations in a local database and every so often works
+out the names and jargon a general recogniser gets wrong, plus one sentence
+about how you write. Both go into the cleanup prompt. A term must appear at
+least twice in your own dictations before it is used, and
+`rustle vocab --forget TERM` blocks one for good. **Forget all** in the
+settings, or `rustle history --clear`, deletes everything stored.
 
 ## Command line
 
 ```
-rustle                     the tray app (first launch opens the setup wizard)
-rustle --headless          engine only, for the GNOME user service
-rustle doctor              check every moving part
-rustle dictate -s 5        record five seconds, recognise, clean, paste
-rustle hotkey down|up|toggle|cancel   drive the running app from a key binding
-rustle context             what the desktop reports as the focused app
-rustle devices             microphones
-rustle gpu                 graphics cards, and whether recognition can use one
-rustle config [--edit]     the config file
-rustle models status|download|import-hf
-rustle eval                run the cleanup cases against the configured model
+rustle                          the app, with its tray icon (the first launch opens the setup wizard)
+rustle doctor                   check every moving part and say what is wrong
+rustle gpu                      graphics cards, and whether recognition can use one
+rustle devices                  microphones
+rustle dictate -s 5             record five seconds, recognise, clean up and paste
+rustle hotkey down|up|toggle|cancel   drive the running app from a key binding (Linux)
+rustle context                  what the desktop reports as the focused app
+rustle config [--edit]          the config file
+rustle models status|download   the speech model files
 rustle learning on|off|status · rustle vocab [--forget X] · rustle learn · rustle history [--clear]
+rustle eval                     run the cleanup test cases against the configured model
+rustle --headless               the engine without windows, for the GNOME background service
 ```
-
-## Configuration
-
-`config.toml` in `~/.config/rustle` (Linux), `~/Library/Application Support/rustle`
-(macOS) or `%APPDATA%\rustle` (Windows); models and the history database live
-in `~/.local/share/rustle`, the same folder on macOS, and `%LOCALAPPDATA%\rustle`
-on Windows. A value in the file that does not fit is skipped on its own and
-`rustle doctor` names it. The settings window edits the file in place
-and keeps the comments; the file is still the nicer way to set per-app rules
-and the dictionary. The parts worth knowing:
-
-- `[cleanup] dictionary` - names and jargon the recogniser mangles.
-- `[cleanup.app_rules]` - per-application tone, keyed by the app identifier
-  `rustle context` prints (a WM class on GNOME, an app name elsewhere).
-- `[cleanup] style` - `light`, `balanced` or `tidy`.
-- `[cleanup] resolve_intent` - the change-of-mind rule, the only one that
-  deletes content.
-- `[cleanup] output_language` - `same`, `en` or `nl`.
-- `[stt] provider` - `auto` uses the graphics card when `rustle gpu` says it
-  is faster than the CPU; `gpu` insists (`cuda`, its old name, still works);
-  `cpu` never tries. For a CUDA build, CUDA libraries somewhere unusual can
-  be named in `RUSTLE_CUDA_LIBS` (a path list).
-- `[desktop] overlay` - `auto`, `window` or `off` (ignored on GNOME).
-- `[desktop] hotkey` - the shortcut: `Ctrl+Alt+Space` by default, `Option+D`
-  (`Alt+D`) on macOS. On GNOME it lives in the extension's settings instead,
-  and the settings window changes it there.
-
-## What the cleanup pass does
-
-Parakeet turns audio into words, then the cleanup model decides what you
-meant by them. Ordinary dictation costs one model call; a second, conditional
-pass runs only when the transcript contains a retraction cue ("no wait",
-"scratch that", "nee wacht"), and a third only when translating.
-
-The polish pass fixes punctuation and capitalisation, removes disfluencies
-and filler uses of "like" and "you know" while keeping them where they mean
-something, repairs the fragments that leaves behind, assembles spoken URLs
-and emails, resolves a change of mind so the output reads as if you had only
-ever said the final version, keeps discourse words and slang, and never
-answers or acts on what you dictated. An output more than 1.5x longer than
-the input, or containing a code block, is rejected and the raw transcript is
-pasted instead.
-
-`rustle eval` pins all of that against the live model with 28 cases, eight of
-them verbatim from real dictations where the failure showed up and four in
-Dutch. Reasoning is off by default: on that corpus it scored the same while
-taking 3-21 s instead of 0.1-0.8 s.
-
-## Learning your vocabulary (off by default)
-
-Switched on, Rustle stores your dictations locally in SQLite and periodically
-mines two things from them with the cleanup model: the names a general
-recogniser gets wrong, and one sentence describing how you write. Both feed
-back into the prompt. Every mined term must appear at least twice in your
-own history before it is kept, and `rustle vocab --forget` blocks a term for
-good. While learning is off, nothing you dictate is stored. What you
-dictate never goes to the log either, unless you ask for it with `-v`.
 
 ## Updates
 
-Installed from a release, Rustle checks GitHub once a day and tells you when
-a newer version is out (Settings → Updates, where you can also turn this
-off). The AppImage, Windows and macOS builds update themselves; .deb and
-.rpm installs link to the releases page. Every update is checked against
-Rustle's signing key before it is installed. Maintainers: see
-[docs/releasing.md](docs/releasing.md).
+Rustle checks for a new release once a day and tells you when one is out
+(Settings → Updates, where you can also turn the check off). On Windows,
+macOS and the AppImage it updates itself; `.deb` and `.rpm` installs get a
+link to the new release. Every update is verified against Rustle's signing
+key before it is installed.
+
+## Troubleshooting
+
+- `rustle doctor`, or **Check setup** under Settings → Status, checks the
+  microphone, the speech model, the graphics card, the shortcut, pasting
+  and the cleanup model, and names whatever is broken.
+- **Copy diagnostics** under Settings → About puts a full report on the
+  clipboard, ready for a bug report.
+- On GNOME, if nothing happens when you press the shortcut, log out and back
+  in once: GNOME only loads a newly installed extension at login.
+
+## Status
+
+Rustle is new. What has been checked where:
+
+| Platform | State |
+|---|---|
+| Linux, GNOME on Wayland | Used daily |
+| Linux, KDE, Hyprland, sway, X11 | The pieces are tested one by one; not yet a full session on each |
+| Windows | Built and tested automatically; not yet tried on a real machine |
+| macOS | Built and tested automatically; not yet tried on a real machine |
+
+Known limits:
+
+- Change-of-mind phrases ("no wait", "scratch that") are recognised in
+  English and Dutch so far. In other languages the rest of the cleanup works
+  as usual.
+- Only plain text survives on the clipboard across a paste; a copied image
+  is lost.
+- On GNOME, dictating with the Activities overview open pastes into its
+  search field.
+- GNOME extensions can break with new GNOME versions. Rustle's is declared
+  for GNOME 47 to 51 and has run on 48.
 
 ## Development
 
 ```sh
 pnpm install
-cargo test --workspace                     # 300+ tests, no models needed
-pnpm tauri dev -- --features webgpu        # the app, with GPU recognition (or cuda)
+cargo test --workspace                       # 300+ tests, no models needed
+pnpm tauri dev -- --features webgpu          # run the app from source (or --features cuda)
 cargo run -p rustle-desktop --example island # drive the live GNOME island over D-Bus
-scripts/nested-shell.sh                    # a throwaway GNOME Shell for extension work
-.venv/bin/python scripts/stt-golden.py     # regenerate recognition fixtures and goldens
+scripts/nested-shell.sh                      # a throwaway GNOME Shell for extension work
 ```
 
-CI runs format, clippy and tests on Linux, Windows and macOS, and the release
-workflow builds installers for all three with `tauri-action`.
+CI runs formatting, clippy and the tests on Linux, Windows and macOS. The
+release workflow builds every installer; see
+[docs/releasing.md](docs/releasing.md). Before a release, work through
+[docs/qa-checklist.md](docs/qa-checklist.md).
 
-## Third-party components
+### How it fits together
 
-See [THIRD_PARTY.md](THIRD_PARTY.md). Rustle itself is MIT licensed.
+```
+┌─ GNOME Shell extension (GNOME only, inside the Shell) ────────────┐
+│  island · focused window · pasting · shortcut                     │
+└──────────────── dev.ceyhun.Rustle.Island (session bus) ───────────┘
+┌─ rustle (Rust + Tauri) ───────────────────────────────────────────┐
+│  engine · microphone · Parakeet on ONNX Runtime · cleanup pass    │
+│  tray · settings window · setup wizard                            │
+│  per-desktop parts: GNOME (D-Bus) · Windows · macOS · X11 ·       │
+│  Wayland (layer-shell overlay, shortcut portal, paste helpers)    │
+└───────────────────────────────────────────────────────────────────┘
+```
 
-## Known limits
+On GNOME the island has to live inside the Shell: Mutter lets no ordinary
+app draw an always-on-top, click-through overlay, and only the Shell can
+see the focused window or paste into it. Everywhere else the app draws the
+island in a window of its own. The engine is one state machine with every
+platform concern behind a trait, so the whole dictation path is tested
+with fakes.
 
-- Only `text/plain` is preserved across the paste; an image on the clipboard
-  is lost.
-- On GNOME, dictating with the Overview open pastes into the Overview search
-  entry.
-- GNOME extensions break across major GNOME releases. The extension is declared
-  for GNOME 47 to 51, but has only run on 48.
-- English and Dutch by choice; Parakeet v3 covers 25 European languages and
-  a third one is transcribed rather than rejected.
-- The cleanup model adds latency proportional to output length. Recognition
-  is effectively free; the model is the slow part.
+```
+crates/rustle-core/     engine, cleanup prompts and passes, providers, config, history, learning, keys
+crates/rustle-audio/    microphone capture
+crates/rustle-stt/      Parakeet TDT on ONNX Runtime, model download, GPU detection
+crates/rustle-desktop/  island, shortcut, focus and paste for each desktop
+src-tauri/              the app: tray, windows, settings commands, command line
+ui/                     the island (canvas), settings window and setup wizard (React)
+extension/              the GNOME Shell extension
+eval/cases.toml         cleanup test cases (`rustle eval`)
+docs/                   release process and the manual test checklist
+flowd/, tests/*.py      the earlier Python version, kept for reference
+```
+
+## License
+
+MIT. Rustle uses NVIDIA's Parakeet TDT 0.6B v3 model (CC-BY-4.0) and
+other open-source components; see [THIRD_PARTY.md](THIRD_PARTY.md).
