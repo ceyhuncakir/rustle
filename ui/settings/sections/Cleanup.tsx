@@ -56,7 +56,7 @@ export function CleanupSection() {
     ? `${fetched.length} available ${provider === "ollama" ? "locally" : "from this provider"}`
     : fetching
       ? "Asking the provider what it offers…"
-      : spec?.needs_api_key && apiKey.source === "not set"
+      : spec?.needs_api_key && provider !== "custom" && apiKey.source === "not set"
         ? "Set a key to load the full list"
         : "";
 

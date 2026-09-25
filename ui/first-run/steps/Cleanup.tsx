@@ -32,13 +32,17 @@ export function CleanupStep() {
     test.reset();
     const backend = next === "cloud" ? (provider ?? cloudKey) : next;
     const p = providers.data?.find((x) => x.key === backend);
+    // `config` is this render's: after the saves below it no longer says
+    // which model is set, so keep track here.
+    let model = config.cleanup.model;
     await save("cleanup", "backend", backend);
-    if (p?.default_model && !p.suggested_models.includes(config.cleanup.model)) {
-      await save("cleanup", "model", p.default_model);
+    if (p?.default_model && !p.suggested_models.includes(model)) {
+      model = p.default_model;
+      await save("cleanup", "model", model);
     }
     if (next === "ollama") {
       const first = ollama.data?.[0];
-      if (first && !ollama.data?.includes(config.cleanup.model)) await save("cleanup", "model", first);
+      if (first && !ollama.data?.includes(model)) await save("cleanup", "model", first);
     }
   };
 

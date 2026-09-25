@@ -103,6 +103,22 @@ fn builtin_shortcut(session: flow_desktop::Session) -> Result<String, String> {
     }
 }
 
+/// The Shell keeps running the extension it loaded at login, which after
+/// an upgrade can be older than the copy this Flow carries.
+#[cfg(target_os = "linux")]
+fn extension_check() -> Result<String, String> {
+    use flow_desktop::linux::gnome;
+    let running = gnome::running_extension_version();
+    if !gnome::extension_outdated(running.as_deref()) {
+        return Ok(format!("version {}", running.as_deref().unwrap_or("?")));
+    }
+    Err(format!(
+        "{} is running, but this Flow carries version {}: install it under Settings > Desktop, then log out and back in",
+        running.map_or("an unversioned copy".to_string(), |v| format!("version {v}")),
+        gnome::bundled_extension_version().unwrap_or_default()
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn builtin_shortcut(_session: flow_desktop::Session) -> Result<String, String> {
     Ok("delivered by the desktop".into())
@@ -138,6 +154,9 @@ pub fn run(config: &Config, notes: &[String], running: bool) -> Vec<Check> {
     #[cfg(target_os = "linux")]
     {
         use flow_desktop::Session;
+        if matches!(session, Session::GnomeWayland { extension: true }) {
+            checks.push(check("GNOME extension", extension_check()));
+        }
         if matches!(
             session,
             Session::KdeWayland

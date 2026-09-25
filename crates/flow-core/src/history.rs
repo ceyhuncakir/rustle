@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::engine::FocusContext;
 
@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS profile (
     updated_at TEXT NOT NULL,
     samples    INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
 ";
 
 /// One stored dictation.
@@ -52,6 +57,27 @@ pub struct History {
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false)
+}
+
+fn read_generation(db: &Connection) -> rusqlite::Result<u64> {
+    let value: Option<i64> =
+        db.query_row("SELECT value FROM meta WHERE key = 'generation'", [], |row| row.get(0)).optional()?;
+    Ok(value.unwrap_or(0).max(0) as u64)
+}
+
+fn upsert_profile(
+    db: &Connection,
+    key: &str,
+    value: &serde_json::Value,
+    samples: u64,
+) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO profile (key, value, updated_at, samples) VALUES (?,?,?,?) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, \
+         updated_at=excluded.updated_at, samples=excluded.samples",
+        params![key, value.to_string(), now_iso(), samples as i64],
+    )?;
+    Ok(())
 }
 
 impl History {
@@ -130,10 +156,15 @@ impl History {
     /// dictations were removed.
     pub fn clear(&self) -> anyhow::Result<u64> {
         let mut db = self.connect()?;
-        let tx = db.transaction()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let removed: u64 = tx.query_row("SELECT COUNT(*) FROM dictation", [], |row| row.get(0))?;
         tx.execute("DELETE FROM dictation", [])?;
         tx.execute("DELETE FROM profile", [])?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('generation', 1) \
+             ON CONFLICT(key) DO UPDATE SET value = value + 1",
+            [],
+        )?;
         tx.commit()?;
         // "Delete everything" should leave nothing to recover: secure_delete
         // zeroed the rows, and rebuilding the file hands the emptied pages
@@ -142,18 +173,41 @@ impl History {
         Ok(removed)
     }
 
+    /// How many times the history has been cleared. Work that reads the
+    /// history and writes back what it learned much later (a profile
+    /// refresh asks a model) notes this first, so that a clear in between
+    /// is not undone.
+    pub fn generation(&self) -> anyhow::Result<u64> {
+        Ok(read_generation(&self.connect()?)?)
+    }
+
     // -- learned profile ----------------------------------------------------
 
     /// Insert or replace one profile entry; `samples` is how many dictations
     /// it was learned from.
     pub fn set_profile(&self, key: &str, value: &serde_json::Value, samples: u64) -> anyhow::Result<()> {
-        self.connect()?.execute(
-            "INSERT INTO profile (key, value, updated_at, samples) VALUES (?,?,?,?) \
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value, \
-             updated_at=excluded.updated_at, samples=excluded.samples",
-            params![key, value.to_string(), now_iso(), samples as i64],
-        )?;
+        upsert_profile(&self.connect()?, key, value, samples)?;
         Ok(())
+    }
+
+    /// Store `(key, value, samples)` entries together, unless the history
+    /// has been cleared since `generation`. Returns whether they were stored.
+    pub fn set_profile_unless_cleared(
+        &self,
+        generation: u64,
+        entries: &[(&str, serde_json::Value, u64)],
+    ) -> anyhow::Result<bool> {
+        let mut db = self.connect()?;
+        // Immediate, so no clear can land between the check and the writes.
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if read_generation(&tx)? != generation {
+            return Ok(false);
+        }
+        for (key, value, samples) in entries {
+            upsert_profile(&tx, key, value, *samples)?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// `None` when nothing has been stored under the key.
@@ -198,6 +252,21 @@ mod tests {
         assert_eq!(row.clean, "Hello there.");
         assert_eq!(row.app, "Slack");
         assert_eq!(row.title, "#eng");
+    }
+
+    #[test]
+    fn a_clear_turns_away_profile_writes_begun_before_it() {
+        let (_dir, store) = store();
+        let before = store.generation().unwrap();
+        store.clear().unwrap();
+        let after = store.generation().unwrap();
+        assert_ne!(before, after);
+
+        let entry = [("vocabulary", json!(["Ptyxis"]), 3)];
+        assert!(!store.set_profile_unless_cleared(before, &entry).unwrap());
+        assert_eq!(store.get_profile("vocabulary").unwrap(), None);
+        assert!(store.set_profile_unless_cleared(after, &entry).unwrap());
+        assert_eq!(store.get_profile("vocabulary").unwrap(), Some(json!(["Ptyxis"])));
     }
 
     #[test]

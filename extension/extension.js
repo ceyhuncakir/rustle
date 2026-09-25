@@ -24,7 +24,7 @@ const HOLD_THRESHOLD_MS = 350;
 const POLL_MS = 40;
 const DEBOUNCE_MS = 150;
 
-const EXTENSION_VERSION = '5';
+const EXTENSION_VERSION = '6';
 const BUS_NAME = 'ai.flow.Island';
 const OBJECT_PATH = '/ai/flow/Island';
 
@@ -299,6 +299,11 @@ export default class FlowExtension extends Extension {
     }
 
     SetState(state) {
+        // The daemon decides whether a take is running: it drops a press
+        // while it is still busy or when the microphone fails, and a take can
+        // start without the extension (`flow hotkey`). Following its state
+        // keeps the next tap meaning start or stop as the user expects.
+        this._recording = state === 'listening';
         this._guard(() => this._island.setState(state));
     }
 

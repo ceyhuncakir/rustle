@@ -157,7 +157,7 @@ pub const PROVIDERS: &[Provider] = &[
         suggested_models: &[],
         base_url: None,
         env_var: Some("FLOW_API_KEY"),
-        note: "Any OpenAI-compatible endpoint: Groq, Together, Fireworks, vLLM, llama.cpp, LM Studio.",
+        note: "Any OpenAI-compatible endpoint: Groq, Together, Fireworks, vLLM, llama.cpp, LM Studio. A local server usually needs no key.",
         public_models_url: None,
     },
     Provider {
@@ -676,11 +676,18 @@ impl OpenAICompatibleBackend {
         provider(&self.provider).map(|p| p.label.to_string()).unwrap_or_else(|| self.provider.clone())
     }
 
+    /// A local server (llama.cpp, LM Studio, vLLM) usually runs without a
+    /// key; only the named providers always want one.
+    fn key_required(&self) -> bool {
+        self.provider != "custom"
+    }
+
     /// The key and address needed before any request can be made, with the
-    /// same messages the Python client construction raised.
+    /// same messages the Python client construction raised. The key may be
+    /// empty for a custom endpoint.
     fn credentials(&self) -> Result<String, BackendError> {
         let key = resolve_key(self.key.as_deref(), &self.provider);
-        if key.is_empty() {
+        if key.is_empty() && self.key_required() {
             let env = provider(&self.provider).and_then(|p| p.env_var);
             return Err(missing_key(&self.provider_label(), env));
         }
@@ -695,7 +702,12 @@ impl OpenAICompatibleBackend {
 
     fn request(&self, method: Method, path: &str, key: &str) -> RequestBuilder {
         let base = self.base_url.as_deref().unwrap_or(OPENAI_API_URL).trim_end_matches('/');
-        self.client.request(method, format!("{base}{path}")).bearer_auth(key)
+        let request = self.client.request(method, format!("{base}{path}"));
+        if key.is_empty() {
+            request
+        } else {
+            request.bearer_auth(key)
+        }
     }
 }
 
@@ -732,7 +744,7 @@ impl Backend for OpenAICompatibleBackend {
 
     fn available(&self) -> (bool, String) {
         let key = resolve_key(self.key.as_deref(), &self.provider);
-        if key.is_empty() {
+        if key.is_empty() && self.key_required() {
             return (false, "no API key set".into());
         }
         if self.provider == "custom" && self.base_url.is_none() {
@@ -928,6 +940,31 @@ mod tests {
     fn custom_provider_uses_the_configured_address() {
         let backend = OpenAICompatibleBackend::new("m", "custom", Some("http://127.0.0.1:8000/v1"));
         assert_eq!(backend.base_url(), Some("http://127.0.0.1:8000/v1"));
+    }
+
+    #[test]
+    fn a_custom_endpoint_works_without_a_key() {
+        // llama.cpp, LM Studio and vLLM run without one unless told otherwise.
+        let server = MockServer::start();
+        let no_auth = |req: &HttpMockRequest| {
+            req.headers
+                .as_ref()
+                .is_none_or(|h| !h.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")))
+        };
+        let chat = server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions").matches(no_auth);
+            then.status(200).json_body(json!({"choices": [{"message": {"content": "Hi there."}}]}));
+        });
+        let probe = server.mock(|when, then| {
+            when.method(GET).path("/v1/models/local").matches(no_auth);
+            then.status(200).json_body(json!({"id": "local"}));
+        });
+        let backend =
+            OpenAICompatibleBackend::new("local", "custom", Some(&server.url("/v1"))).with_api_key("");
+        assert_eq!(backend.available(), (true, "ok".to_string()));
+        assert_eq!(backend.complete("s", "hi there", 5.0, false).unwrap(), "Hi there.");
+        chat.assert();
+        probe.assert();
     }
 
     #[test]

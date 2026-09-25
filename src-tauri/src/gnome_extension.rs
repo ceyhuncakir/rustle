@@ -41,7 +41,16 @@ fn bundled(app: &AppHandle) -> anyhow::Result<PathBuf> {
 pub fn install(app: &AppHandle) -> anyhow::Result<()> {
     let source = bundled(app)?;
     let target = installed_dir().context("no data folder to install the extension into")?;
-    copy_dir(&source, &target).with_context(|| format!("copying the extension to {}", target.display()))?;
+    // A development setup links the installed folder to the source tree
+    // (scripts/install-app.sh); copying the tree onto itself would empty
+    // every file.
+    let same = matches!((source.canonicalize(), target.canonicalize()), (Ok(a), Ok(b)) if a == b);
+    if same {
+        info!("{} is the bundled extension already", target.display());
+    } else {
+        copy_dir(&source, &target)
+            .with_context(|| format!("copying the extension to {}", target.display()))?;
+    }
 
     let schemas = target.join("schemas");
     let compiled = Command::new("glib-compile-schemas")

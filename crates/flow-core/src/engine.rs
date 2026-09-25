@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::dsp;
 use crate::history::History;
 use crate::hold_or_tap::{Action, HoldOrTap};
-use crate::learning::Learner;
+use crate::learning::{Learned, Learner};
 
 /// The island pushes ~60 levels/sec; there is no point sending more than the
 /// waveform can show.
@@ -26,6 +26,10 @@ const LEVEL_INTERVAL: Duration = Duration::from_millis(20);
 /// The error state has no auto-hide on the overlay side; the engine clears
 /// it after a beat.
 const ERROR_HIDE_AFTER: Duration = Duration::from_millis(2500);
+/// How long the success state lingers (`TIMING.autoHide` in both islands).
+/// The pill fades itself out; the engine follows, so the overlay window and
+/// the tray do not go on believing a paste is still under way.
+const SUCCESS_HIDE_AFTER: Duration = Duration::from_millis(1400);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -134,9 +138,14 @@ pub enum Event {
     },
     /// The microphone stream broke mid-take (unplugged, taken away).
     MicError(String),
-    HideError {
+    Hide {
         seq: u64,
     },
+    /// A background refresh learned a new profile.
+    Learned(Learned),
+    /// The stored profile changed under the engine (the user cleared the
+    /// history): take it up again from the store.
+    ReloadProfile,
     Shutdown,
 }
 
@@ -175,7 +184,8 @@ pub struct Engine {
     processing_at: Instant,
     last_level: Instant,
     last_raw: String,
-    error_seq: u64,
+    /// Bumped by every scheduled hide, so only the latest one acts.
+    hide_seq: u64,
     since_refresh: Arc<AtomicU32>,
     learning_now: Arc<AtomicBool>,
 }
@@ -212,7 +222,7 @@ impl Engine {
             processing_at: now,
             last_level: now - LEVEL_INTERVAL,
             last_raw: String::new(),
-            error_seq: 0,
+            hide_seq: 0,
             since_refresh: Arc::new(AtomicU32::new(0)),
             learning_now: Arc::new(AtomicBool::new(false)),
         }
@@ -237,15 +247,18 @@ impl Engine {
         }
 
         if let Some(history) = &self.history {
-            let (terms, style) = crate::learning::load_profile(history);
-            info!(
-                "learning on: {} dictations stored, {} terms learned",
-                history.count().unwrap_or(0),
-                terms.len()
-            );
-            self.cleaner.set_profile(terms, style);
+            info!("learning on: {} dictations stored", history.count().unwrap_or(0));
+            self.reload_profile();
         }
         Ok(())
+    }
+
+    /// Hand the cleaner whatever profile the store holds now.
+    fn reload_profile(&self) {
+        let Some(history) = &self.history else { return };
+        let (terms, style) = crate::learning::load_profile(history);
+        info!("{} learned terms in use", terms.len());
+        self.cleaner.set_profile(terms, style);
     }
 
     /// Run until `Event::Shutdown`.
@@ -293,11 +306,13 @@ impl Engine {
                 }
             }
             Event::MicError(message) => self.on_mic_error(&message),
-            Event::HideError { seq } => {
-                if seq == self.error_seq && !self.busy && !self.recorder.recording() {
+            Event::Hide { seq } => {
+                if seq == self.hide_seq && !self.busy && !self.recorder.recording() {
                     self.overlay.set_state(State::Hidden);
                 }
             }
+            Event::Learned(learned) => self.on_learned(learned),
+            Event::ReloadProfile => self.reload_profile(),
             Event::Shutdown => return false,
         }
         true
@@ -343,6 +358,9 @@ impl Engine {
             // started something: a tap would stay latched, and the next tap
             // would be spent stopping a recording that never began.
             self.hold.reset();
+            // The GNOME extension latched the same tap on its side. Saying
+            // the state again tells it that nothing started.
+            self.overlay.set_state(State::Thinking);
             return;
         }
         self.take += 1;
@@ -489,6 +507,7 @@ impl Engine {
             return;
         }
 
+        self.hide_after(SUCCESS_HIDE_AFTER);
         self.remember(text);
     }
 
@@ -497,13 +516,31 @@ impl Engine {
         warn!("failed: {message}");
         self.overlay.set_text(message);
         self.overlay.set_state(State::Error);
-        self.error_seq += 1;
-        let seq = self.error_seq;
+        self.hide_after(ERROR_HIDE_AFTER);
+    }
+
+    /// Hide the island after `delay`, unless something newer is on it by then.
+    fn hide_after(&mut self, delay: Duration) {
+        self.hide_seq += 1;
+        let seq = self.hide_seq;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(ERROR_HIDE_AFTER);
-            let _ = tx.send(Event::HideError { seq });
+            std::thread::sleep(delay);
+            let _ = tx.send(Event::Hide { seq });
         });
+    }
+
+    /// A refresh that read the history before the user cleared it must not
+    /// bring the forgotten profile back.
+    fn on_learned(&self, learned: Learned) {
+        let Some(history) = &self.history else { return };
+        match history.generation() {
+            Ok(current) if current == learned.generation => {
+                self.cleaner.set_profile(learned.terms, learned.style)
+            }
+            Ok(_) => debug!("dropping a profile learned from history that has since been cleared"),
+            Err(err) => warn!("could not check the history before using the new profile: {err}"),
+        }
     }
 
     /// Store the dictation and re-mine the profile when enough have piled up.
@@ -517,7 +554,7 @@ impl Engine {
         let since_refresh = Arc::clone(&self.since_refresh);
         let learning_now = Arc::clone(&self.learning_now);
         let learner = self.learner.clone();
-        let cleaner = Arc::clone(&self.cleaner);
+        let tx = self.tx.clone();
 
         std::thread::spawn(move || {
             if let Err(err) = history.record(&raw, &text, &context) {
@@ -536,12 +573,15 @@ impl Engine {
 
             since_refresh.store(0, Ordering::SeqCst);
             learning_now.store(true, Ordering::SeqCst);
-            match learner.refresh(&history, cfg.max_terms) {
-                Ok((terms, style)) => {
-                    if !terms.is_empty() || !style.is_empty() {
-                        cleaner.set_profile(terms, style);
+            // The engine thread hands the result to the cleaner, after
+            // checking the history was not cleared since.
+            match learner.refresh_unless_cleared(&history, cfg.max_terms) {
+                Ok(Some(learned)) => {
+                    if !learned.terms.is_empty() || !learned.style.is_empty() {
+                        let _ = tx.send(Event::Learned(learned));
                     }
                 }
+                Ok(None) => {}
                 Err(err) => warn!("profile refresh failed: {err}"),
             }
             learning_now.store(false, Ordering::SeqCst);
@@ -1040,6 +1080,57 @@ mod tests {
         r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
         assert_eq!(r.starts.load(Ordering::SeqCst), 2);
         assert!(r.engine.recorder.recording());
+    }
+
+    #[test]
+    fn a_press_dropped_while_busy_says_the_state_again() {
+        // The GNOME extension latches a tap before the engine sees it; the
+        // repeated state is what tells it the press started nothing.
+        let gate = Arc::new(Gate::default());
+        let mut r = rig(2.0, FakeTranscriber::gated("hi", &gate));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 1);
+        let states = r.overlay.states.lock().unwrap().clone();
+        assert_eq!(states, vec![State::Listening, State::Thinking, State::Thinking]);
+        gate.open(1);
+        next_result(&mut r.engine);
+    }
+
+    #[test]
+    fn a_successful_take_hides_the_island_after_the_success_state() {
+        let mut r = rig(2.0, FakeTranscriber::saying("hello"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        settle(&mut r.engine);
+        let started = Instant::now();
+        while r.overlay.states.lock().unwrap().last() != Some(&State::Hidden) {
+            assert!(started.elapsed() < Duration::from_secs(5), "the island was never hidden");
+            if let Ok(event) = r.engine.rx.recv_timeout(Duration::from_millis(50)) {
+                r.engine.handle(event);
+            }
+        }
+        assert!(started.elapsed() >= SUCCESS_HIDE_AFTER - Duration::from_millis(100));
+        let states = r.overlay.states.lock().unwrap().clone();
+        assert_eq!(states, vec![State::Listening, State::Thinking, State::Inserting, State::Hidden]);
+    }
+
+    #[test]
+    fn a_new_take_is_not_hidden_by_the_last_ones_timer() {
+        let mut r = rig(2.0, FakeTranscriber::saying("hello"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        settle(&mut r.engine);
+        // The next take is recording when the first one's hide comes due.
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        let deadline = Instant::now() + SUCCESS_HIDE_AFTER + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if let Ok(event) = r.engine.rx.recv_timeout(Duration::from_millis(50)) {
+                r.engine.handle(event);
+            }
+        }
+        assert_eq!(r.overlay.states.lock().unwrap().last(), Some(&State::Listening));
     }
 
     #[test]

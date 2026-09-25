@@ -49,6 +49,10 @@ function Wizard() {
   const [status, setStatus] = useState<Status | null>(null);
   const [starting, setStarting] = useState(false);
   const engineBusy = useRef(false);
+  // An engine step reached while a start was still under way; that start
+  // may predate settings changed since, so look again once it is done.
+  const engineAgain = useRef(false);
+  const onEngineStep = useRef(false);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [index, setIndex] = useState(() => {
     const q = new URLSearchParams(location.search).get("step");
@@ -82,23 +86,34 @@ function Wizard() {
   const last = index === STEPS.length - 1;
   const engineStep = ENGINE_STEPS.has(step.id);
 
-  useEffect(() => {
-    if (!engineStep || engineBusy.current) return;
+  onEngineStep.current = engineStep;
+
+  const syncEngine = async (): Promise<void> => {
+    if (engineBusy.current) {
+      engineAgain.current = true;
+      return;
+    }
     engineBusy.current = true;
     setStarting(true);
-    void (async () => {
-      try {
-        const s = await api.getStatus();
-        if (!s.running) await api.setRunning(true);
-        else if (s.needs_restart) await api.restartEngine();
-      } catch (err) {
-        toast(`Could not start Flow: ${describe(err)}`);
-      } finally {
-        engineBusy.current = false;
-        setStarting(false);
-        await refreshStatus();
-      }
-    })();
+    try {
+      const s = await api.getStatus();
+      if (!s.running) await api.setRunning(true);
+      else if (s.needs_restart) await api.restartEngine();
+    } catch (err) {
+      toast(`Could not start Flow: ${describe(err)}`);
+    } finally {
+      engineBusy.current = false;
+      setStarting(false);
+      await refreshStatus();
+    }
+    if (engineAgain.current) {
+      engineAgain.current = false;
+      if (onEngineStep.current) await syncEngine();
+    }
+  };
+
+  useEffect(() => {
+    if (engineStep) void syncEngine();
   }, [step.id]);
 
   // A start that looked fine can still fail a moment later (the model).

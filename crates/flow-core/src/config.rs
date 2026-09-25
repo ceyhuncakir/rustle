@@ -9,6 +9,7 @@
 //! existing `config.toml` keeps working.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -485,7 +486,13 @@ pub fn set_value(section: &str, key: &str, value: impl Into<Value>) -> anyhow::R
     set_value_in(&path, section, key, value)
 }
 
+/// Held across each read-modify-write of the file. The settings commands
+/// run on a thread pool, and two saves at once would otherwise both start
+/// from the old file and each keep only its own change.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn set_value_in(path: &Path, section: &str, key: &str, value: impl Into<Value>) -> anyhow::Result<()> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     write_default_config_to(path)?;
     let text = std::fs::read_to_string(path)?;
     let mut doc: toml_edit::DocumentMut = text.parse()?;
@@ -513,8 +520,23 @@ pub fn set_value_in(path: &Path, section: &str, key: &str, value: impl Into<Valu
         }
     }
 
-    std::fs::write(path, doc.to_string())?;
+    write_replacing(path, &doc.to_string())?;
     Ok(())
+}
+
+/// Write a whole new file beside the old one and rename it into place, so
+/// a crash halfway leaves the old file rather than half of the new one. A
+/// symlinked config (a dotfiles checkout) is followed, not replaced.
+fn write_replacing(path: &Path, text: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut temp = target.clone().into_os_string();
+    temp.push(".saving");
+    let temp = PathBuf::from(temp);
+    std::fs::write(&temp, text)?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&temp, meta.permissions());
+    }
+    std::fs::rename(&temp, &target)
 }
 
 #[cfg(test)]
@@ -669,6 +691,39 @@ mod tests {
         assert!(text.contains("[audio]\nmodel = \"a\""), "{text}");
         assert!(text.contains("model = \"c\""), "{text}");
         assert!(!text.contains("model = \"b\""), "{text}");
+    }
+
+    #[test]
+    fn saves_at_the_same_time_keep_every_change() {
+        let (_dir, path) = scratch();
+        std::fs::write(&path, "[audio]\n").unwrap();
+        let savers: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    set_value_in(&path, "audio", &format!("k{i}"), Value::Int(i)).unwrap()
+                })
+            })
+            .collect();
+        for saver in savers {
+            saver.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for i in 0..8 {
+            assert!(text.contains(&format!("k{i} = {i}")), "{text}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_symlink_keeps_the_link() {
+        let (dir, path) = scratch();
+        let real = dir.path().join("dotfiles-config.toml");
+        std::fs::write(&real, "[audio]\n").unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        set_value_in(&path, "audio", "sample_rate", Value::Int(48000)).unwrap();
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert!(std::fs::read_to_string(&real).unwrap().contains("sample_rate = 48000"));
     }
 
     #[test]

@@ -218,9 +218,22 @@ impl Learner {
     /// profile built up over weeks. Both are empty only when nothing has
     /// ever been learned.
     pub fn refresh(&self, history: &History, max_terms: usize) -> anyhow::Result<(Vec<String>, String)> {
+        let learned = self.refresh_unless_cleared(history, max_terms)?;
+        Ok(learned.map(|learned| (learned.terms, learned.style)).unwrap_or_default())
+    }
+
+    /// [`Learner::refresh`], except that when the history is cleared while
+    /// the model is being asked, nothing is stored and `None` comes back:
+    /// what was learned came from dictations the user has just deleted.
+    pub fn refresh_unless_cleared(
+        &self,
+        history: &History,
+        max_terms: usize,
+    ) -> anyhow::Result<Option<Learned>> {
+        let generation = history.generation()?;
         let samples = history.samples_for_learning(DEFAULT_SAMPLE_LIMIT)?;
         if samples.is_empty() {
-            return Ok((Vec::new(), String::new()));
+            return Ok(Some(Learned { terms: Vec::new(), style: String::new(), generation }));
         }
 
         let terms = self.mine_vocabulary(&samples, max_terms);
@@ -230,23 +243,39 @@ impl Learner {
         let style = self.profile_style(&samples);
         info!("learned {} terms and a style note from {} dictations", terms.len(), samples.len());
 
-        let terms = if terms.is_empty() {
-            string_list(history.get_profile(VOCAB_KEY)?)
-        } else {
-            history.set_profile(VOCAB_KEY, &json!(terms), samples.len() as u64)?;
-            terms
-        };
+        let count = samples.len() as u64;
+        let mut entries = Vec::new();
+        if !terms.is_empty() {
+            entries.push((VOCAB_KEY, json!(terms), count));
+        }
+        if !style.is_empty() {
+            entries.push((STYLE_KEY, json!(style), count));
+        }
+        if !history.set_profile_unless_cleared(generation, &entries)? {
+            info!("the history was cleared while learning from it; nothing learned is kept");
+            return Ok(None);
+        }
+
+        let terms = if terms.is_empty() { string_list(history.get_profile(VOCAB_KEY)?) } else { terms };
         let style = if style.is_empty() {
             match history.get_profile(STYLE_KEY)? {
                 Some(Value::String(note)) => note,
                 _ => String::new(),
             }
         } else {
-            history.set_profile(STYLE_KEY, &json!(style), samples.len() as u64)?;
             style
         };
-        Ok((terms, style))
+        Ok(Some(Learned { terms, style, generation }))
     }
+}
+
+/// The profile a refresh left in effect, and the [`History::generation`] it
+/// was learned from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Learned {
+    pub terms: Vec<String>,
+    pub style: String,
+    pub generation: u64,
 }
 
 /// What has been learned so far: `(terms, style_note)`, empty on a fresh
@@ -549,6 +578,45 @@ mod tests {
         assert_eq!(terms, strings(&["Tauri"]));
         assert_eq!(style, "New note.");
         assert_eq!(load_profile(&store), (strings(&["Tauri"]), "New note.".into()));
+    }
+
+    /// Clears the history while the model is being asked, as the user can
+    /// from the settings window in the middle of a refresh.
+    struct ClearsMidway {
+        path: std::path::PathBuf,
+        inner: Arc<Fake>,
+    }
+
+    impl Backend for ClearsMidway {
+        fn complete(
+            &self,
+            system: &str,
+            prompt: &str,
+            timeout: f32,
+            thinking: bool,
+        ) -> Result<String, BackendError> {
+            History::open(self.path.clone()).unwrap().clear().unwrap();
+            self.inner.complete(system, prompt, timeout, thinking)
+        }
+        fn available(&self) -> (bool, String) {
+            (true, "ok".into())
+        }
+        fn label(&self) -> String {
+            "ClearsMidway".into()
+        }
+    }
+
+    #[test]
+    fn a_refresh_overtaken_by_a_clear_keeps_nothing() {
+        let (dir, store) = open_store();
+        for _ in 0..3 {
+            record(&store, "raw", "Ptyxis is the terminal I use; Ptyxis again");
+        }
+        let path = dir.path().join("nested").join("h.db");
+        let learner =
+            Learner::new(Arc::new(ClearsMidway { path, inner: Fake::new("[\"Ptyxis\"]", "Casual.") }));
+        assert_eq!(learner.refresh_unless_cleared(&store, 40).unwrap(), None);
+        assert_eq!(load_profile(&store), (Vec::new(), String::new()));
     }
 
     #[test]

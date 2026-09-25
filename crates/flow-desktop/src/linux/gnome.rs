@@ -95,6 +95,31 @@ pub fn wait_for_extension(timeout: Duration) -> bool {
     }
 }
 
+/// The version of the extension this build of Flow carries, from its
+/// metadata.json; the extension reports the same number as `Version`.
+pub fn bundled_extension_version() -> Option<u32> {
+    const METADATA: &str = include_str!("../../../../extension/metadata.json");
+    let (_, rest) = METADATA.split_once("\"version\"")?;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The version the running extension reports, if one is running and new
+/// enough to say.
+pub fn running_extension_version() -> Option<String> {
+    GnomeIsland::connect().ok()?.extension_version()
+}
+
+/// Whether `running` (the running extension's version) is older than the
+/// copy this build carries. The Shell keeps running an old copy after Flow
+/// is upgraded, without the calls and bindings the new daemon expects. One
+/// too old to report a version counts as older.
+pub fn extension_outdated(running: Option<&str>) -> bool {
+    let Some(bundled) = bundled_extension_version() else { return false };
+    running.and_then(|v| v.trim().parse::<u32>().ok()).is_none_or(|v| v < bundled)
+}
+
 fn bus() -> Option<DBusProxy<'static>> {
     let conn = Connection::session().ok()?;
     DBusProxy::new(&conn).ok()
@@ -124,6 +149,7 @@ impl GnomeIsland {
         Ok(GnomeIsland { proxy })
     }
 
+    /// `None` from an extension too old to have the property.
     pub fn extension_version(&self) -> Option<String> {
         self.proxy.version().ok()
     }
@@ -214,5 +240,31 @@ impl Hotkey for GnomeHotkey {
     fn stop(&mut self) {
         // The iterators end with the connection; nothing to interrupt.
         self.threads.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bundled_version_is_the_one_the_extension_reports() {
+        let js = include_str!("../../../../extension/extension.js");
+        let reported = js
+            .split_once("const EXTENSION_VERSION = '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .and_then(|(version, _)| version.parse::<u32>().ok());
+        assert!(reported.is_some());
+        assert_eq!(reported, bundled_extension_version());
+    }
+
+    #[test]
+    fn older_or_unversioned_extensions_are_outdated() {
+        let bundled = bundled_extension_version().unwrap();
+        assert!(extension_outdated(None));
+        assert!(extension_outdated(Some("garbage")));
+        assert!(extension_outdated(Some(&(bundled - 1).to_string())));
+        assert!(!extension_outdated(Some(&bundled.to_string())));
+        assert!(!extension_outdated(Some(&(bundled + 1).to_string())));
     }
 }

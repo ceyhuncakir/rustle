@@ -20,8 +20,17 @@ pub fn build(session: Session, config: &DesktopConfig) -> anyhow::Result<Backend
         Session::GnomeWayland { extension: true } => {
             let island = Arc::new(gnome::GnomeIsland::connect()?);
             notes.push("overlay, hotkey, focus and paste: GNOME Shell extension over D-Bus".into());
-            if let Some(version) = island.extension_version() {
+            let version = island.extension_version();
+            if let Some(version) = &version {
                 notes.push(format!("extension version {version}"));
+            }
+            if gnome::extension_outdated(version.as_deref()) {
+                log::warn!(
+                    "the running GNOME extension ({}) is older than version {} that this Flow carries; \
+                     update it under Settings > Desktop and log out and back in",
+                    version.as_deref().unwrap_or("no version"),
+                    gnome::bundled_extension_version().unwrap_or_default()
+                );
             }
             Ok(Backends {
                 session,

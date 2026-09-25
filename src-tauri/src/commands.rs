@@ -387,9 +387,14 @@ pub fn get_learning_summary(shared: App<'_>) -> LearningSummary {
 }
 
 #[tauri::command(async)]
-pub fn forget_history() -> Result<u64, String> {
+pub fn forget_history(shared: App<'_>) -> Result<u64, String> {
     let history = flow_core::history::History::open_default().map_err(err)?;
-    history.clear().map_err(err)
+    let removed = history.clear().map_err(err)?;
+    // The running engine holds the learned profile in memory as well.
+    if let Some(engine) = shared.engine.lock().unwrap().as_ref() {
+        let _ = engine.tx.send(flow_core::engine::Event::ReloadProfile);
+    }
+    Ok(removed)
 }
 
 // -- doctor, diagnostics, updates ----------------------------------------------------
@@ -456,13 +461,25 @@ pub fn get_permissions() -> Vec<Permission> {
     {
         use flow_desktop::Session;
         match flow_desktop::session::detect() {
-            Session::GnomeWayland { extension } => list.push(Permission {
-                id: "hotkey-gnome-extension".into(),
-                label: "Flow GNOME Shell extension".into(),
-                granted: extension,
-                required: true,
-                help: "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.".into(),
-            }),
+            Session::GnomeWayland { extension } => {
+                use flow_desktop::linux::gnome;
+                let running = if extension { gnome::running_extension_version() } else { None };
+                let outdated = extension && gnome::extension_outdated(running.as_deref());
+                list.push(Permission {
+                    id: "hotkey-gnome-extension".into(),
+                    label: "Flow GNOME Shell extension".into(),
+                    granted: extension && !outdated,
+                    required: true,
+                    help: if outdated {
+                        format!(
+                            "The Shell is running an older copy of Flow's extension ({}), which lacks parts this Flow relies on. Installing this version's copy takes effect after you log out and back in.",
+                            running.map_or("no version".to_string(), |v| format!("version {v}"))
+                        )
+                    } else {
+                        "Flow's Shell extension draws the island, hears the shortcut and pastes the text. Installing it takes effect after you log out and back in.".into()
+                    },
+                });
+            }
             session @ (Session::KdeWayland | Session::LayerShellWayland | Session::OtherWayland) => {
                 // On PATH is not enough: ydotool needs its daemon, dotool
                 // needs /dev/uinput.
