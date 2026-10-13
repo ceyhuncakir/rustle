@@ -156,7 +156,9 @@ pub fn current_hotkey(session: rustle_desktop::Session, config: &Config) -> Stri
     config.desktop.hotkey.clone()
 }
 
-/// Who picks the dictation shortcut on this desktop.
+/// Who picks the dictation shortcut on this desktop. Only Linux has desktops
+/// where it is not Rustle.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum HotkeyOwner {
     /// Rustle: the shortcut plugin grabs it (Windows, macOS, X11), or
     /// Rustle's GNOME extension does, from its setting.
