@@ -15,7 +15,7 @@ function choiceOf(backend: string): Choice {
 }
 
 export function CleanupStep() {
-  const { config, save } = useWizard();
+  const { config, save, latest } = useWizard();
   const providers = useAsync(() => api.listProviders());
   const ollama = useAsync(() => api.listProviderModels("ollama").catch(() => [] as string[]));
   const [choice, setChoice] = useState<Choice>(() => choiceOf(config.cleanup.backend));
@@ -29,23 +29,24 @@ export function CleanupStep() {
   // Only asked once a cloud provider is chosen; most list nothing without a key.
   const cloudModels = useProviderModels(choice === "cloud" ? cloudKey : "none", spec?.suggested_models ?? [], config.cleanup.model);
 
+  // Decided from the latest choice, not this render's `config`, and both
+  // writes asked for in the same tick: two quick picks must not leave one
+  // provider's model with the other provider.
   const pick = async (next: Choice, provider?: string) => {
     setChoice(next);
     test.reset();
     const backend = next === "cloud" ? (provider ?? cloudKey) : next;
     const p = providers.data?.find((x) => x.key === backend);
-    // `config` is this render's: after the saves below it no longer says
-    // which model is set, so keep track here.
-    let model = config.cleanup.model;
-    await save("cleanup", "backend", backend);
-    if (p?.default_model && !p.suggested_models.includes(model)) {
-      model = p.default_model;
-      await save("cleanup", "model", model);
-    }
+    const current = latest().cleanup.model;
+    let model = current;
+    if (p?.default_model && !p.suggested_models.includes(model)) model = p.default_model;
     if (next === "ollama") {
       const first = ollama.data?.[0];
-      if (first && !ollama.data?.includes(model)) await save("cleanup", "model", first);
+      if (first && !ollama.data?.includes(model)) model = first;
     }
+    const writes = [save("cleanup", "backend", backend)];
+    if (model !== current) writes.push(save("cleanup", "model", model));
+    await Promise.all(writes);
   };
 
   const installed = ollama.data?.length ?? 0;
@@ -124,8 +125,11 @@ export function CleanupStep() {
             </label>
             {spec?.has_base_url && (
               <div>
-                <div className="mb-1 text-[13.5px]">API address</div>
+                <label htmlFor="base-url" className="mb-1 block text-[13.5px]">
+                  API address
+                </label>
                 <TextField
+                  id="base-url"
                   value={config.cleanup.base_url}
                   placeholder="https://api.groq.com/openai/v1"
                   onApply={async (v) => {
@@ -137,12 +141,13 @@ export function CleanupStep() {
             )}
             <div>
               <div className="mb-1 text-[13.5px]">
-                {spec?.label ?? "API"} key
+                <label htmlFor="api-key">{spec?.label ?? "API"} key</label>
                 {apiKey.fromEnv && <span className="ml-2 text-[12.5px] text-fg-2">using {apiKey.source}</span>}
                 {apiKey.source === "keyring" && <span className="ml-2 text-[12.5px] text-success">saved</span>}
               </div>
               {!apiKey.fromEnv && (
                 <TextField
+                  id="api-key"
                   key={cloudKey}
                   value=""
                   secret
@@ -157,6 +162,7 @@ export function CleanupStep() {
             </div>
             {modelField(cloudModels.choices, cloudModels.fetching)}
             {spec?.note && <p className="text-[12.5px] text-fg-2">{spec.note}</p>}
+            {providers.error && <Outcome ok={false}>Could not list the providers: {providers.error}</Outcome>}
           </div>,
         )}
       </ul>

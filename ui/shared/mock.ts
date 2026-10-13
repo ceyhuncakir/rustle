@@ -4,7 +4,8 @@
 // overlay events are emitted on a timer so the pill can be watched in a
 // normal browser tab. `?state=listening&text=...` on the overlay page pins
 // one state instead of cycling, which is how the screenshots are taken;
-// `?running=0` starts with the engine off.
+// `?running=0` starts with the engine off, and `?hotkey=desktop` or
+// `?hotkey=compositor` previews a desktop where Rustle can't set the key.
 
 import type {
   Config,
@@ -81,9 +82,18 @@ const config: Config = {
 };
 
 let running = params.get("running") !== "0";
+// Switched on, even when the engine died loading the model.
+let enabled = running;
 let needsRestart = false;
 let engineError: string | null = null;
 let hotkey = config.desktop.hotkey;
+const hotkeyOwner = (params.get("hotkey") ?? "rustle") as Status["hotkey_owner"];
+const hotkeyHelp: string | null =
+  hotkeyOwner === "desktop"
+    ? "Your desktop delivers Ctrl+Alt+Space to Rustle. Your desktop owns this shortcut, so change it in the desktop's settings."
+    : hotkeyOwner === "compositor"
+      ? "Your compositor's portal has no global shortcuts, so bind a key in its config to run `rustle hotkey down` on press and `rustle hotkey up` on release. Then press it once to check."
+      : null;
 let overlayState = "hidden";
 let speaking = false;
 let autostart = false;
@@ -134,8 +144,8 @@ const providers: ProviderSpec[] = [
     key: "anthropic",
     label: "Anthropic Claude",
     needs_api_key: true,
-    default_model: "claude-opus-5",
-    suggested_models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+    default_model: "claude-opus-5-5",
+    suggested_models: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
     note: "",
     has_base_url: false,
   },
@@ -188,7 +198,7 @@ const providers: ProviderSpec[] = [
 
 const providerModels: Record<string, string[]> = {
   ollama: ["gemma3:12b", "llama3.1:8b", "qwen3:14b", "qwen3:8b"],
-  anthropic: ["claude-haiku-4-5", "claude-opus-5", "claude-sonnet-5"],
+  anthropic: ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"],
   openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-5", "gpt-5-mini", "o4-mini"],
   openrouter: [
     "anthropic/claude-sonnet-5",
@@ -241,13 +251,18 @@ let learning: LearningSummary = {
 
 type Args = Record<string, unknown>;
 
-/** Like the engine: it reads its config once, when it starts. */
+/**
+ * Like the engine: it reads its config once, when it starts, and starting
+ * succeeds before the model loads, on the engine's own thread. Without the
+ * model that thread dies: switched on, not running, with an error.
+ */
 function start(): void {
   needsRestart = false;
+  enabled = true;
   if (!downloaded.has(config.stt.model)) {
     running = false;
     engineError = `the recognition model ${config.stt.model} is not downloaded`;
-    throw new Error(engineError);
+    return;
   }
   running = true;
   engineError = null;
@@ -269,7 +284,9 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_config_value: ({ section, key, value }) => {
     (config[section as ConfigSection] as unknown as Record<string, ConfigValue>)[key as string] = value as ConfigValue;
     if (section === "desktop" && key === "hotkey") hotkey = String(value);
-    else if (running) needsRestart = true;
+    else if (section === "desktop" && key === "check_updates") {
+      // Read at each check, so it applies at once.
+    } else if (running) needsRestart = true;
     return needsRestart;
   },
   get_config_path: () => "/home/you/.config/rustle/config.toml",
@@ -278,8 +295,11 @@ const commands: Record<string, (args: Args) => unknown> = {
   get_status: () =>
     ({
       running,
+      enabled,
       state: running ? overlayState : "hidden",
       hotkey,
+      hotkey_owner: hotkeyOwner,
+      hotkey_help: hotkeyHelp,
       version: "0.3.0",
       needs_restart: needsRestart,
       session: "mock",
@@ -288,7 +308,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_running: async ({ on }) => {
     await sleep(400);
     if (on) start();
-    else running = false;
+    else running = enabled = false;
   },
   restart_engine: async () => {
     running = false;
@@ -357,7 +377,6 @@ const commands: Record<string, (args: Args) => unknown> = {
   get_key_source: ({ provider }) => {
     const p = String(provider);
     if (envKeys.has(p)) return `$${p.toUpperCase()}_API_KEY`;
-    if (providers.some((x) => x.key === p && !x.needs_api_key)) return "not needed";
     return keys.get(p) ? "keyring" : "not set";
   },
   set_api_key: ({ provider, key }) => {
@@ -375,6 +394,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
 
   set_hotkey: ({ combo }) => {
+    if (hotkeyHelp) throw new Error(hotkeyHelp);
     hotkey = String(combo);
     config.desktop.hotkey = hotkey;
   },
@@ -383,6 +403,10 @@ const commands: Record<string, (args: Args) => unknown> = {
   get_permissions: () => permissions.map((p) => ({ ...p })),
   request_permission: async ({ id }) => {
     await sleep(600);
+    // As in Rust: the user installs the helper, there is nothing to request.
+    if (id === "paste-tool") {
+      throw new Error("Install dotool or ydotool with your package manager (ydotool also needs its ydotoold service running), then check again.");
+    }
     // The extension only runs after the next login.
     const p = permissions.find((x) => x.id === id);
     if (p && id !== "hotkey-gnome-extension") p.granted = true;
@@ -411,7 +435,13 @@ const commands: Record<string, (args: Args) => unknown> = {
       sample: "Um so the, the meeting is at three — no wait, at four — and bring the KVK papers.\n→ The meeting is at four; bring the KVK papers.",
     };
   },
-  wizard_complete: () => undefined,
+  wizard_complete: () => {
+    if (!downloaded.has(config.stt.model)) {
+      const label = sttModels.find((m) => m.id === config.stt.model)?.label ?? config.stt.model;
+      throw new Error(`${label} is not downloaded yet. Download it on the Recognition step first: Rustle can't dictate without it.`);
+    }
+    start();
+  },
 };
 
 export async function invoke<T>(cmd: string, args: Args = {}): Promise<T> {

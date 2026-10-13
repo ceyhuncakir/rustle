@@ -8,8 +8,8 @@
 //!   openai    - GPT, and anything else speaking the OpenAI protocol
 //!
 //! Cleanup is a short, latency-sensitive rewrite, so the hosted backends are
-//! configured for speed rather than depth: low effort, no streaming, small
-//! output cap. The whole dictation waits on this call.
+//! configured for speed rather than depth: low effort, no streaming, a
+//! bounded output cap. The whole dictation waits on this call.
 //!
 //! All HTTP here is blocking: the engine calls backends from plain worker
 //! threads, never from an async runtime.
@@ -27,8 +27,25 @@ use serde_json::json;
 use crate::config::CleanupConfig;
 use crate::secrets;
 
-/// Cleanup output is bounded by what the speaker said; this is generous.
-const MAX_TOKENS: u32 = 4096;
+/// The cap for a model that thinks before it answers. The thinking counts
+/// against it too, and effort "high" can spend thousands of tokens before
+/// the first word of the answer. A reply that hits the cap is an error (see
+/// [`CUT_OFF`]), so the cap only has to be generous, not exact.
+const MAX_TOKENS: u32 = 16_000;
+/// The cap for a model that only answers. Cleanup output is bounded by what
+/// the speaker said, so this is generous, and it stays under the output
+/// limit of older models and of OpenAI-protocol servers that reject a
+/// larger one.
+const PLAIN_MAX_TOKENS: u32 = 4096;
+
+/// What a reply that hit the cap is turned into. Half a dictation pasted as
+/// if it were all of it loses the end without a trace; the raw transcript
+/// it falls back to does not.
+const CUT_OFF: &str = "stopped at the length limit before finishing";
+
+/// How long Ollama keeps a model the warm-up loaded, until the warm-up
+/// knows it is still wanted; see `OllamaBackend::warm_up_while`.
+const WARM_UP_KEEP_ALIVE: &str = "1m";
 
 /// Where the OpenAI protocol lives when a provider names no other address.
 const OPENAI_API_URL: &str = "https://api.openai.com/v1";
@@ -58,6 +75,11 @@ pub trait Backend: Send + Sync {
     /// Seconds spent. Hosted models are always warm, so by default there is
     /// nothing to do.
     fn warm_up(&self) -> f64 {
+        self.warm_up_while(&|| true)
+    }
+    /// [`warm_up`](Self::warm_up), asking `wanted` once the model is in;
+    /// false leaves it to unload itself shortly.
+    fn warm_up_while(&self, _wanted: &dyn Fn() -> bool) -> f64 {
         0.0
     }
     /// Hand back whatever the model holds; nothing, for a hosted backend.
@@ -106,8 +128,8 @@ pub const PROVIDERS: &[Provider] = &[
         key: "anthropic",
         label: "Anthropic Claude",
         needs_api_key: true,
-        default_model: "claude-opus-5",
-        suggested_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+        default_model: "claude-opus-5-5",
+        suggested_models: &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
         base_url: None,
         env_var: Some("ANTHROPIC_API_KEY"),
         note: "",
@@ -374,6 +396,8 @@ pub struct OllamaBackend {
 #[derive(Deserialize)]
 struct GenerateReply {
     response: Option<String>,
+    /// "length" when the reply hit `num_predict`.
+    done_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -422,10 +446,15 @@ impl Backend for OllamaBackend {
             "stream": false,
             "think": thinking,
             "keep_alive": self.keep_alive,
-            "options": {"temperature": 0.1},
+            // Ollama's own default is no limit at all, which a model stuck
+            // repeating itself turns into a wait for the timeout.
+            "options": {"temperature": 0.1, "num_predict": MAX_TOKENS},
         });
         let reply: GenerateReply =
             send_json(self.generate(&body), timeout_secs).map_err(|err| BackendError(err.to_string()))?;
+        if reply.done_reason.as_deref() == Some("length") {
+            return Err(BackendError(format!("{} {CUT_OFF}", self.model)));
+        }
         Ok(reply.response.unwrap_or_default())
     }
 
@@ -435,8 +464,12 @@ impl Backend for OllamaBackend {
             Err(err) => return (false, format!("Ollama unreachable at {}: {err}", self.endpoint)),
         };
 
+        // Ollama reads a name without a tag as ":latest", so "qwen3" is only
+        // there when "qwen3:latest" is - having "qwen3:14b" is not enough.
         let wanted = self.model.as_str();
-        if !names.iter().any(|n| n == wanted || n.split(':').next() == Some(wanted)) {
+        let latest = format!("{wanted}:latest");
+        let tagged = wanted.rsplit('/').next().is_some_and(|last| last.contains(':'));
+        if !names.iter().any(|n| n == wanted || (!tagged && *n == latest)) {
             let have = if names.is_empty() { "none".to_string() } else { names.join(", ") };
             return (false, format!("model {wanted:?} not pulled (have: {have})"));
         }
@@ -456,19 +489,34 @@ impl Backend for OllamaBackend {
             .unwrap_or_default()
     }
 
-    fn warm_up(&self) -> f64 {
+    /// Loaded with a keep-alive of a minute, and given the configured one
+    /// (an hour by default) only once it is in and still wanted. Ollama
+    /// neither cancels a load when the request goes away nor unloads a model
+    /// that is still loading - an unload meanwhile does nothing - so a
+    /// Rustle that quits, restarts or is killed mid-load would otherwise
+    /// leave the model in memory for the whole keep-alive.
+    fn warm_up_while(&self, wanted: &dyn Fn() -> bool) -> f64 {
         let started = Instant::now();
         let body = json!({
             "model": self.model,
             "prompt": "hi",
             "stream": false,
             "think": false,
-            "keep_alive": self.keep_alive,
+            "keep_alive": WARM_UP_KEEP_ALIVE,
             "options": {"num_predict": 1},
         });
         if let Err(err) = send(self.generate(&body), 180.0) {
             warn!("could not warm up {}: {err}", self.model);
             return 0.0;
+        }
+        if !wanted() {
+            info!("{} loaded after it stopped being wanted; Ollama lets it go within a minute", self.model);
+            return 0.0;
+        }
+        // No prompt: Ollama only (re)sets how long the model stays.
+        let keep = json!({"model": self.model, "keep_alive": self.keep_alive});
+        if let Err(err) = send(self.generate(&keep), 10.0) {
+            warn!("could not keep {} loaded: {err}", self.model);
         }
         started.elapsed().as_secs_f64()
     }
@@ -492,6 +540,26 @@ pub struct AnthropicBackend {
     /// See [`resolve_key`].
     key: Option<String>,
     client: Client,
+}
+
+/// Whether a Claude model takes `output_config.effort`. The models before
+/// it reject a request that sets it, so those are listed and everything
+/// else - models newer than this code included - gets it. Opus 4.5 takes
+/// only low, medium and high, which is all cleanup asks for.
+fn takes_effort(model: &str) -> bool {
+    const WITHOUT_EFFORT: &[&str] = &[
+        // Every Claude 3, 3.5 and 3.7.
+        "claude-3",
+        // Sonnet 4 and Opus 4, by alias and by dated id, and Opus 4.1.
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-2025",
+        "claude-opus-4-0",
+        "claude-opus-4-2025",
+        "claude-opus-4-1",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+    ];
+    !WITHOUT_EFFORT.iter().any(|old| model.starts_with(old))
 }
 
 #[derive(Deserialize)]
@@ -559,21 +627,29 @@ impl Backend for AnthropicBackend {
         thinking: bool,
     ) -> Result<String, BackendError> {
         let key = self.api_key()?;
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": PLAIN_MAX_TOKENS,
             "system": system,
             "messages": [{"role": "user", "content": prompt}],
-            // Cleanup is a short rewrite and the user is waiting on it, so
-            // keep thinking shallow rather than switching it off - disabling
-            // it on Opus 5 can leak reasoning into the visible answer.
-            "output_config": {"effort": if thinking { "high" } else { "low" }},
         });
+        // Cleanup is a short rewrite and the user is waiting on it, so keep
+        // thinking shallow rather than switching it off - disabling it on
+        // Opus 5 can leak reasoning into the visible answer. Older models do
+        // not think unless asked, and refuse the setting.
+        if takes_effort(&self.model) {
+            body["max_tokens"] = json!(MAX_TOKENS);
+            body["output_config"] = json!({"effort": if thinking { "high" } else { "low" }});
+        }
         let reply: MessagesReply =
             send_json(self.request(Method::POST, "/v1/messages", &key).json(&body), timeout_secs)
                 .map_err(|err| BackendError(err.for_user("Anthropic", &self.model)))?;
-        if reply.stop_reason.as_deref() == Some("refusal") {
-            return Err(BackendError("Anthropic declined to process this transcript".into()));
+        match reply.stop_reason.as_deref() {
+            Some("refusal") => {
+                return Err(BackendError("Anthropic declined to process this transcript".into()))
+            }
+            Some("max_tokens") => return Err(BackendError(format!("Anthropic {CUT_OFF}"))),
+            _ => {}
         }
         Ok(reply.content.iter().filter(|b| b.kind == "text").map(|b| b.text.as_str()).collect())
     }
@@ -627,6 +703,8 @@ struct ChatReply {
 #[derive(Deserialize)]
 struct Choice {
     message: ChatMessage,
+    /// "length" when the reply hit `max_completion_tokens`.
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -723,7 +801,7 @@ impl Backend for OpenAICompatibleBackend {
         let label = self.provider_label();
         let body = json!({
             "model": self.model,
-            "max_completion_tokens": MAX_TOKENS,
+            "max_completion_tokens": PLAIN_MAX_TOKENS,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -737,6 +815,9 @@ impl Backend for OpenAICompatibleBackend {
             .into_iter()
             .next()
             .ok_or_else(|| BackendError(format!("{label} returned no choices")))?;
+        if choice.finish_reason.as_deref() == Some("length") {
+            return Err(BackendError(format!("{label} {CUT_OFF}")));
+        }
         // Reasoning models on some routers return the answer alongside a
         // separate reasoning field; only the answer should be pasted.
         Ok(choice.message.content.unwrap_or_default().trim().to_string())
@@ -980,7 +1061,7 @@ mod tests {
     fn hosted_backends_fail_clearly_without_a_key() {
         // A missing key must say so, not surface as a timeout or a stack trace.
         let backends: Vec<Box<dyn Backend>> = vec![
-            Box::new(AnthropicBackend::new("claude-opus-5").with_api_key("")),
+            Box::new(AnthropicBackend::new("claude-opus-5-5").with_api_key("")),
             Box::new(OpenAICompatibleBackend::new("gpt-5", "openai", None).with_api_key("")),
             Box::new(
                 OpenAICompatibleBackend::new("deepseek/deepseek-chat", "openrouter", None).with_api_key(""),
@@ -1004,7 +1085,7 @@ mod tests {
 
     #[test]
     fn hosted_backends_are_always_warm() {
-        assert_eq!(AnthropicBackend::new("claude-opus-5").warm_up(), 0.0);
+        assert_eq!(AnthropicBackend::new("claude-opus-5-5").warm_up(), 0.0);
         assert_eq!(OpenAICompatibleBackend::new("gpt-5", "openai", None).warm_up(), 0.0);
         assert_eq!(OpenAICompatibleBackend::new("x", "openrouter", None).warm_up(), 0.0);
     }
@@ -1159,7 +1240,7 @@ mod tests {
         let server = MockServer::start();
         let generate = server.mock(|when, then| {
             when.method(POST).path("/api/generate").json_body_partial(
-                r#"{"model": "qwen3:14b", "system": "sys", "prompt": "hi there", "stream": false, "think": true, "keep_alive": "1h", "options": {"temperature": 0.1}}"#,
+                r#"{"model": "qwen3:14b", "system": "sys", "prompt": "hi there", "stream": false, "think": true, "keep_alive": "1h", "options": {"temperature": 0.1, "num_predict": 16000}}"#,
             );
             then.status(200).json_body(json!({"response": "Hi there."}));
         });
@@ -1184,24 +1265,46 @@ mod tests {
             then.status(200).json_body(json!({"done": true}));
         });
         assert_eq!(backend.complete("s", "empty", 5.0, false).unwrap(), "");
+        // A reply that hit num_predict is not the whole answer.
+        server.mock(|when, then| {
+            when.method(POST).path("/api/generate").body_contains("\"prompt\":\"long\"");
+            then.status(200)
+                .json_body(json!({"response": "Half of it", "done": true, "done_reason": "length"}));
+        });
+        let err = backend.complete("s", "long", 5.0, false).unwrap_err();
+        assert_eq!(err.to_string(), "m stopped at the length limit before finishing");
     }
 
     #[test]
-    fn ollama_availability_matches_bare_and_tagged_names() {
+    fn ollama_availability_reads_a_bare_name_as_latest() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(GET).path("/api/tags");
-            then.status(200).json_body(json!({"models": [{"name": "qwen3:14b"}, {"name": "llama3.1:8b"}]}));
+            then.status(200).json_body(json!({"models": [
+                {"name": "qwen3:14b"}, {"name": "llama3.1:8b"}, {"name": "mistral:latest"},
+                {"name": "hf.co/someone/model:Q4_K_M"}
+            ]}));
         });
         let url = server.base_url();
         assert_eq!(OllamaBackend::new("qwen3:14b", &url, "1h").available(), (true, "ok".into()));
-        assert_eq!(OllamaBackend::new("qwen3", &url, "1h").available(), (true, "ok".into()));
+        assert_eq!(OllamaBackend::new("mistral", &url, "1h").available(), (true, "ok".into()));
+        assert_eq!(OllamaBackend::new("mistral:latest", &url, "1h").available(), (true, "ok".into()));
+        assert_eq!(
+            OllamaBackend::new("hf.co/someone/model:Q4_K_M", &url, "1h").available(),
+            (true, "ok".into())
+        );
+        // Ollama would ask for qwen3:latest, which is not there; every
+        // dictation would fail while this said ok.
+        let have = "have: qwen3:14b, llama3.1:8b, mistral:latest, hf.co/someone/model:Q4_K_M";
+        let (ok, why) = OllamaBackend::new("qwen3", &url, "1h").available();
+        assert!(!ok);
+        assert_eq!(why, format!("model \"qwen3\" not pulled ({have})"));
         let (ok, why) = OllamaBackend::new("phi4", &url, "1h").available();
         assert!(!ok);
-        assert_eq!(why, "model \"phi4\" not pulled (have: qwen3:14b, llama3.1:8b)");
+        assert_eq!(why, format!("model \"phi4\" not pulled ({have})"));
         assert_eq!(
             OllamaBackend::new("qwen3", &url, "1h").installed_models(),
-            strings(&["llama3.1:8b", "qwen3:14b"])
+            strings(&["hf.co/someone/model:Q4_K_M", "llama3.1:8b", "mistral:latest", "qwen3:14b"])
         );
     }
 
@@ -1222,9 +1325,13 @@ mod tests {
         let server = MockServer::start();
         let warm = server.mock(|when, then| {
             when.method(POST).path("/api/generate").json_body_partial(
-                r#"{"model": "m", "prompt": "hi", "stream": false, "think": false, "keep_alive": "30m", "options": {"num_predict": 1}}"#,
+                r#"{"model": "m", "prompt": "hi", "stream": false, "think": false, "keep_alive": "1m", "options": {"num_predict": 1}}"#,
             );
             then.status(200).json_body(json!({"response": ""}));
+        });
+        let keep = server.mock(|when, then| {
+            when.method(POST).path("/api/generate").json_body(json!({"model": "m", "keep_alive": "30m"}));
+            then.status(200).json_body(json!({"done": true, "done_reason": "load"}));
         });
         let unload = server.mock(|when, then| {
             when.method(POST).path("/api/generate").json_body_partial(r#"{"model": "m", "keep_alive": 0}"#);
@@ -1234,7 +1341,12 @@ mod tests {
         assert!(backend.warm_up() > 0.0);
         backend.unload();
         warm.assert();
+        keep.assert();
         unload.assert();
+        // Once nobody wants it, the model keeps the short keep-alive.
+        assert_eq!(backend.warm_up_while(&|| false), 0.0);
+        warm.assert_hits(2);
+        keep.assert_hits(1);
         // A dead server warms nothing and says so with 0.0.
         assert_eq!(OllamaBackend::new("m", "http://127.0.0.1:1", "1h").warm_up(), 0.0);
     }
@@ -1248,7 +1360,7 @@ mod tests {
                 .header("x-api-key", "sk-ant")
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .json_body_partial(
-                    r#"{"model": "claude-opus-5", "max_tokens": 4096, "system": "sys", "messages": [{"role": "user", "content": "hello"}], "output_config": {"effort": "low"}}"#,
+                    r#"{"model": "claude-opus-5-5", "max_tokens": 16000, "system": "sys", "messages": [{"role": "user", "content": "hello"}], "output_config": {"effort": "low"}}"#,
                 );
             then.status(200).json_body(json!({
                 "stop_reason": "end_turn",
@@ -1264,11 +1376,67 @@ mod tests {
             then.status(200).json_body(json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "Thought about it."}]}));
         });
         let backend =
-            AnthropicBackend::new("claude-opus-5").with_api_key("sk-ant").with_base_url(&server.base_url());
+            AnthropicBackend::new("claude-opus-5-5").with_api_key("sk-ant").with_base_url(&server.base_url());
         assert_eq!(backend.complete("sys", "hello", 5.0, false).unwrap(), "Hello there.");
         assert_eq!(backend.complete("sys", "hello", 5.0, true).unwrap(), "Thought about it.");
         low.assert();
         high.assert();
+    }
+
+    #[test]
+    fn older_claude_models_are_not_sent_effort() {
+        // Haiku 4.5 answers a request that sets effort with a 400, which would
+        // turn every cleanup into the raw transcript.
+        let server = MockServer::start();
+        let plain = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/messages")
+                .json_body_partial(r#"{"model": "claude-haiku-4-5", "max_tokens": 4096}"#)
+                .matches(|req| {
+                    !String::from_utf8_lossy(req.body.as_deref().unwrap_or_default())
+                        .contains("output_config")
+                });
+            then.status(200)
+                .json_body(json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": "Hi."}]}));
+        });
+        let backend = AnthropicBackend::new("claude-haiku-4-5")
+            .with_api_key("sk-ant")
+            .with_base_url(&server.base_url());
+        assert_eq!(backend.complete("sys", "hi", 5.0, true).unwrap(), "Hi.");
+        plain.assert();
+    }
+
+    #[test]
+    fn effort_goes_to_every_model_that_takes_it() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "claude-opus-4-5",
+            "claude-opus-4-5-20251101",
+        ] {
+            assert!(takes_effort(model), "{model}");
+        }
+        for model in [
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-0",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-0",
+            "claude-opus-4-20250514",
+            "claude-opus-4-1",
+            "claude-3-7-sonnet-latest",
+            "claude-3-5-haiku-latest",
+            "claude-3-haiku-20240307",
+        ] {
+            assert!(!takes_effort(model), "{model}");
+        }
     }
 
     #[test]
@@ -1278,6 +1446,12 @@ mod tests {
             when.method(POST).path("/v1/messages").body_contains("refuse");
             then.status(200).json_body(json!({"stop_reason": "refusal", "content": []}));
         });
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/messages").body_contains("ramble");
+            then.status(200).json_body(
+                json!({"stop_reason": "max_tokens", "content": [{"type": "text", "text": "Half of"}]}),
+            );
+        });
         for (marker, status) in [("unauthorised", 401), ("throttled", 429), ("broken", 503)] {
             server.mock(move |when, then| {
                 when.method(POST).path("/v1/messages").body_contains(marker);
@@ -1285,15 +1459,17 @@ mod tests {
             });
         }
         let backend =
-            AnthropicBackend::new("claude-opus-5").with_api_key("sk-ant").with_base_url(&server.base_url());
+            AnthropicBackend::new("claude-opus-5-5").with_api_key("sk-ant").with_base_url(&server.base_url());
         let message = |prompt: &str| backend.complete("s", prompt, 5.0, false).unwrap_err().to_string();
         assert_eq!(message("refuse"), "Anthropic declined to process this transcript");
+        assert_eq!(message("ramble"), "Anthropic stopped at the length limit before finishing");
         assert_eq!(message("unauthorised"), "Anthropic rejected the API key");
         assert_eq!(message("throttled"), "Anthropic rate limit reached");
         assert_eq!(message("broken"), "Anthropic error 503");
 
-        let dead =
-            AnthropicBackend::new("claude-opus-5").with_api_key("sk-ant").with_base_url("http://127.0.0.1:1");
+        let dead = AnthropicBackend::new("claude-opus-5-5")
+            .with_api_key("sk-ant")
+            .with_base_url("http://127.0.0.1:1");
         assert_eq!(dead.complete("s", "p", 5.0, false).unwrap_err().to_string(), "could not reach Anthropic");
     }
 
@@ -1301,8 +1477,8 @@ mod tests {
     fn anthropic_available_and_installed_models() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(GET).path("/v1/models/claude-opus-5").header("x-api-key", "sk-ant");
-            then.status(200).json_body(json!({"id": "claude-opus-5", "type": "model"}));
+            when.method(GET).path("/v1/models/claude-opus-5-5").header("x-api-key", "sk-ant");
+            then.status(200).json_body(json!({"id": "claude-opus-5-5", "type": "model"}));
         });
         server.mock(|when, then| {
             when.method(GET).path("/v1/models/nope");
@@ -1311,14 +1487,14 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method(GET).path("/v1/models").query_param("limit", "1000");
-            then.status(200).json_body(json!({"data": [{"id": "claude-sonnet-5"}, {"id": "claude-haiku-4-5"}, {"id": "claude-opus-5"}]}));
+            then.status(200).json_body(json!({"data": [{"id": "claude-sonnet-5-5"}, {"id": "claude-haiku-5-5"}, {"id": "claude-opus-5-5"}]}));
         });
         let backend =
-            AnthropicBackend::new("claude-opus-5").with_api_key("sk-ant").with_base_url(&server.base_url());
+            AnthropicBackend::new("claude-opus-5-5").with_api_key("sk-ant").with_base_url(&server.base_url());
         assert_eq!(backend.available(), (true, "ok".into()));
         assert_eq!(
             backend.installed_models(),
-            strings(&["claude-haiku-4-5", "claude-opus-5", "claude-sonnet-5"])
+            strings(&["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"])
         );
 
         let missing = AnthropicBackend::new("nope").with_api_key("sk-ant").with_base_url(&server.base_url());
@@ -1352,6 +1528,16 @@ mod tests {
                 .json_body(json!({"choices": [{"message": {"role": "assistant", "content": null}}]}));
         });
         assert_eq!(backend.complete("sys", "nothing", 5.0, false).unwrap(), "");
+
+        // A reply cut off at max_completion_tokens is not the whole answer.
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions").body_contains("ramble");
+            then.status(200).json_body(json!({"choices": [
+                {"message": {"role": "assistant", "content": "Half of"}, "finish_reason": "length"}
+            ]}));
+        });
+        let err = backend.complete("sys", "ramble", 5.0, false).unwrap_err();
+        assert_eq!(err.to_string(), "Other (OpenAI-compatible) stopped at the length limit before finishing");
     }
 
     #[test]

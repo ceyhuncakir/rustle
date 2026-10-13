@@ -5,7 +5,7 @@
 //! centred on request.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustle_core::engine::{Overlay, State};
@@ -17,6 +17,9 @@ mod window;
 pub const WINDOW_LABEL: &str = window::LABEL;
 /// The pill fades for 180 ms before the window can go.
 const HIDE_AFTER: Duration = Duration::from_millis(220);
+
+/// The island's last text, for a page that loads after it was sent.
+static TEXT: Mutex<String> = Mutex::new(String::new());
 
 pub struct WebviewOverlay {
     app: AppHandle,
@@ -62,6 +65,7 @@ impl Overlay for WebviewOverlay {
     }
 
     fn set_text(&self, text: &str) {
+        text.clone_into(&mut TEXT.lock().unwrap_or_else(|p| p.into_inner()));
         self.emit("rustle:text", serde_json::json!({ "text": text }));
     }
 
@@ -78,9 +82,12 @@ pub fn overlay_resize(app: AppHandle, width: f64, height: f64) {
     }
 }
 
-/// The page loaded; tell it the current state in case one was set before.
+/// The page loaded; tell it the current state and text in case they were
+/// set before.
 #[tauri::command]
 pub fn overlay_ready(app: AppHandle, shared: tauri::State<'_, Arc<crate::host::Shared>>) {
     let state = *shared.state.lock().unwrap();
+    let text = TEXT.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let _ = app.emit_to(WINDOW_LABEL, "rustle:text", serde_json::json!({ "text": text }));
     let _ = app.emit_to(WINDOW_LABEL, "rustle:state", serde_json::json!({ "state": state.as_str() }));
 }

@@ -11,10 +11,15 @@ export function LearningSection() {
   const [confirm, setConfirm] = useState(false);
 
   const s = summary.data;
-  const learned =
-    s && s.count > 0
-      ? `${s.terms.length} terms from ${s.count} dictations` + (s.terms.length ? ` - ${s.terms.slice(0, 4).join(", ")}…` : "")
-      : "Nothing stored yet";
+  const learned = summary.error ? (
+    <span className="text-danger">Could not read what it has learned: {summary.error}</span>
+  ) : s && s.count > 0 ? (
+    `${s.terms.length} terms from ${s.count} dictations` + (s.terms.length ? ` - ${s.terms.slice(0, 4).join(", ")}…` : "")
+  ) : summary.loading && !s ? (
+    "Loading…"
+  ) : (
+    "Nothing stored yet"
+  );
 
   const forget = useAction(
     async () => {

@@ -10,6 +10,7 @@ use crate::{Backends, HotkeySource, OverlayChoice, OverlayMode, Session, Webview
 pub mod control;
 pub mod gnome;
 pub mod portal;
+pub(crate) mod toplevel;
 pub mod wayland;
 
 pub fn build(session: Session, config: &DesktopConfig) -> anyhow::Result<Backends> {

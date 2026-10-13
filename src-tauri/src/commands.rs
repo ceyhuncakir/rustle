@@ -94,8 +94,18 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
 #[derive(Debug, Serialize)]
 pub struct Status {
     pub running: bool,
+    /// Dictation is switched on, though its engine may have died since (see
+    /// `error`); false once it is switched off.
+    pub enabled: bool,
     pub state: String,
     pub hotkey: String,
+    /// Who sets the shortcut: `rustle` (grabbed by Rustle, or written to
+    /// Rustle's GNOME extension), `desktop` (the portal: the desktop's
+    /// settings pick the key) or `compositor` (its own key bindings run
+    /// `rustle hotkey`).
+    pub hotkey_owner: &'static str,
+    /// What to do instead of recording a shortcut, when Rustle doesn't own it.
+    pub hotkey_help: Option<String>,
     pub version: String,
     pub needs_restart: bool,
     pub session: String,
@@ -108,10 +118,18 @@ pub struct Status {
 pub fn get_status(shared: App<'_>) -> Status {
     let config = shared.config();
     let session = rustle_desktop::session::detect();
+    let (hotkey_owner, hotkey_help) = match hotkey_owner(session) {
+        HotkeyOwner::Rustle => ("rustle", None),
+        HotkeyOwner::Desktop(why) => ("desktop", Some(why)),
+        HotkeyOwner::Compositor(how) => ("compositor", Some(how)),
+    };
     Status {
         running: shared.running(),
+        enabled: shared.engine.lock().unwrap().is_some(),
         state: shared.state.lock().unwrap().as_str().to_string(),
         hotkey: current_hotkey(session, &config),
+        hotkey_owner,
+        hotkey_help,
         version: crate::APP_VERSION.to_string(),
         needs_restart: shared.needs_restart.load(Ordering::SeqCst),
         session: session.to_string(),
@@ -136,6 +154,44 @@ pub fn current_hotkey(session: rustle_desktop::Session, config: &Config) -> Stri
     }
     let _ = session;
     config.desktop.hotkey.clone()
+}
+
+/// Who picks the dictation shortcut on this desktop.
+enum HotkeyOwner {
+    /// Rustle: the shortcut plugin grabs it (Windows, macOS, X11), or
+    /// Rustle's GNOME extension does, from its setting.
+    Rustle,
+    /// The desktop portal hands Rustle the key the desktop's settings chose.
+    Desktop(String),
+    /// Nothing grabs a key for Rustle; the compositor's own key bindings run
+    /// `rustle hotkey`.
+    Compositor(String),
+}
+
+/// On Wayland without Rustle's extension the shortcut plugin's X11 grab only
+/// hears keys while an XWayland window has focus, so a key recorded there
+/// would look saved and do nothing.
+fn hotkey_owner(session: rustle_desktop::Session) -> HotkeyOwner {
+    #[cfg(target_os = "linux")]
+    {
+        use rustle_desktop::Session;
+        if matches!(
+            session,
+            Session::GnomeWayland { extension: false }
+                | Session::KdeWayland
+                | Session::LayerShellWayland
+                | Session::OtherWayland
+        ) {
+            let (_, help) = crate::host::shortcut::permission(session);
+            return if rustle_desktop::linux::portal::version().is_some() {
+                HotkeyOwner::Desktop(help)
+            } else {
+                HotkeyOwner::Compositor(help)
+            };
+        }
+    }
+    let _ = session;
+    HotkeyOwner::Rustle
 }
 
 #[tauri::command(async)]
@@ -653,10 +709,15 @@ pub fn set_hotkey(app: AppHandle, shared: App<'_>, combo: String) -> Result<(), 
         return crate::gnome_extension::set_binding(&combo).map_err(err);
     }
     // Where the desktop's portal hands Rustle its shortcut, the desktop picks
-    // the key; asking it for another would change nothing.
+    // the key; asking it for another would change nothing. Where nothing
+    // does, the compositor's key bindings are the only way in.
     #[cfg(target_os = "linux")]
     if rustle_desktop::linux::portal::active() {
         return Err(crate::host::shortcut::OWNED_BY_THE_DESKTOP.into());
+    }
+    match hotkey_owner(rustle_desktop::session::detect()) {
+        HotkeyOwner::Rustle => {}
+        HotkeyOwner::Desktop(help) | HotkeyOwner::Compositor(help) => return Err(help),
     }
 
     // The engine's sender and current shortcut, without holding the lock
@@ -817,9 +878,22 @@ pub struct CleanupTest {
     pub sample: String,
 }
 
+/// The cleanup the wizard tried last. Trying another hands that one's model
+/// back: a local model the user moved on from should not sit in memory for
+/// `keep_alive`. The one in use stays loaded for the dictation that follows.
+static TESTED: std::sync::Mutex<Option<config::CleanupConfig>> = std::sync::Mutex::new(None);
+
 #[tauri::command(async)]
 pub fn wizard_test_cleanup(shared: App<'_>) -> CleanupTest {
-    let cleaner = rustle_core::cleanup::build_cleaner(&shared.config().cleanup);
+    let cfg = shared.config().cleanup;
+    let previous = TESTED.lock().unwrap_or_else(|p| p.into_inner()).replace(cfg.clone());
+    if let Some(previous) = previous {
+        let model = |c: &config::CleanupConfig| (c.backend.clone(), c.model.clone(), c.endpoint.clone());
+        if model(&previous) != model(&cfg) {
+            rustle_core::cleanup::build_cleaner(&previous).unload();
+        }
+    }
+    let cleaner = rustle_core::cleanup::build_cleaner(&cfg);
     let (ok, why) = cleaner.available();
     if !ok {
         return CleanupTest { ok: false, sample: why };
@@ -833,9 +907,19 @@ pub fn wizard_test_cleanup(shared: App<'_>) -> CleanupTest {
 
 /// Start dictating and close the wizard. The engine starts first, so a
 /// failure (say, a shortcut another app owns) is shown in the wizard rather
-/// than lost behind a closed window.
+/// than lost behind a closed window. The model is checked up front: the
+/// engine loads it on its own thread, after `start` has said yes, and a
+/// wizard closed by then would not come back.
 #[tauri::command(async)]
 pub fn wizard_complete(app: AppHandle, shared: App<'_>) -> Result<(), String> {
+    let stt = shared.config().stt;
+    let precision = rustle_stt::gpu::precision_for(&stt.provider);
+    if !models::is_downloaded(&stt.model, precision) {
+        let label = models::stt_model(&stt.model).map_or(stt.model.as_str(), |m| m.label);
+        return Err(format!(
+            "{label} is not downloaded yet. Download it on the Recognition step first: Rustle can't dictate without it."
+        ));
+    }
     host::start(&shared, Some(&app)).map_err(err)?;
     crate::tray::sync_toggle(&app);
     host::mark_first_run_done().map_err(err)?;

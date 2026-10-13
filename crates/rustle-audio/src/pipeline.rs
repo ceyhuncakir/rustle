@@ -4,8 +4,9 @@
 //! Everything here runs inside cpal's audio callback, so after
 //! [`Pipeline::new`] the hot path does no allocation in the common case:
 //! scratch buffers are sized up front and the take reserves a minute of
-//! audio. (A callback larger than the scratch, or a take longer than the
-//! reservation, grows a `Vec` once - rare, and harmless for dictation.)
+//! audio. (A callback larger than the scratch grows a `Vec` once; a take
+//! longer than a minute starts another minute's block, and never copies
+//! what it already holds.)
 
 use log::warn;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -34,8 +35,9 @@ const MAX_FFT_BLOCK: u32 = 4096;
 /// half the CPU of rubato's 256 default.
 const SINC_LEN: usize = 128;
 
-/// Take capacity reserved at start, so `Vec::push` in the callback does not
-/// reallocate during a normal dictation.
+/// The take is stored in blocks of this much audio, so `Vec::push` in the
+/// callback does not reallocate during a normal dictation, and a long one
+/// grows a block at a time.
 const RESERVE_SECONDS: usize = 60;
 
 /// The largest cpal callback the mono scratch is pre-sized for.
@@ -147,6 +149,52 @@ impl Framer {
     }
 }
 
+/// The take, in fixed-size blocks. A growing `Vec` would copy everything
+/// captured so far each time it doubles - inside the audio callback, where
+/// copying a quarter of a gigabyte means a dropout - so a full block is set
+/// aside and a fresh one started instead. Flattened once, on stop.
+struct Blocks {
+    block_len: usize,
+    full: Vec<Vec<f32>>,
+    current: Vec<f32>,
+}
+
+impl Blocks {
+    fn new(block_len: usize) -> Blocks {
+        let block_len = block_len.max(1);
+        Blocks { block_len, full: Vec::new(), current: Vec::with_capacity(block_len) }
+    }
+
+    fn extend_from_slice(&mut self, mut samples: &[f32]) {
+        while !samples.is_empty() {
+            if self.current.len() == self.block_len {
+                let next = Vec::with_capacity(self.block_len);
+                self.full.push(std::mem::replace(&mut self.current, next));
+            }
+            let n = (self.block_len - self.current.len()).min(samples.len());
+            self.current.extend_from_slice(&samples[..n]);
+            samples = &samples[n..];
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.full.len() * self.block_len + self.current.len()
+    }
+
+    /// Everything stored, in order, leaving nothing behind.
+    fn take(&mut self) -> Vec<f32> {
+        if self.full.is_empty() {
+            return std::mem::take(&mut self.current);
+        }
+        let mut all = Vec::with_capacity(self.len());
+        for block in self.full.drain(..) {
+            all.extend_from_slice(&block);
+        }
+        all.append(&mut self.current);
+        all
+    }
+}
+
 enum Stage {
     /// Same rate in and out, or rubato refused the ratio (then [`Pipeline::finish`]
     /// runs the whole take through `rustle_core::dsp::resample`).
@@ -174,7 +222,7 @@ pub struct Pipeline {
     framer: Framer,
     /// Levels produced since the last [`Pipeline::drain_levels`].
     levels: Vec<f32>,
-    take: Vec<f32>,
+    take: Blocks,
 }
 
 impl Pipeline {
@@ -218,7 +266,7 @@ impl Pipeline {
             frames_in: 0,
             framer: Framer::new(BLOCK_FRAMES),
             levels: Vec::with_capacity(SCRATCH_FRAMES / BLOCK_FRAMES + 2),
-            take: Vec::with_capacity(take_rate as usize * RESERVE_SECONDS),
+            take: Blocks::new(take_rate as usize * RESERVE_SECONDS),
         }
     }
 
@@ -246,7 +294,7 @@ impl Pipeline {
     pub fn finish(&mut self) -> Vec<f32> {
         match self.stage {
             Stage::Passthrough => {
-                let take = std::mem::take(&mut self.take);
+                let take = self.take.take();
                 if self.source_rate == self.target_rate {
                     take
                 } else {
@@ -266,10 +314,11 @@ impl Pipeline {
                     self.resample_chunk(Some(0));
                     flushes += 1;
                 }
-                self.take.truncate(expected);
+                let mut take = self.take.take();
+                take.truncate(expected);
                 self.frames_in = 0;
                 self.skip = 0;
-                std::mem::take(&mut self.take)
+                take
             }
         }
     }
@@ -409,6 +458,32 @@ mod tests {
         let got = dsp::rms(&out);
         assert!((got - want).abs() / want < 0.10, "rms {got}, wanted {want} +-10%");
         out
+    }
+
+    #[test]
+    fn a_take_longer_than_a_block_comes_back_whole_and_in_order() {
+        let mut blocks = Blocks::new(4);
+        let samples: Vec<f32> = (0..11).map(|i| i as f32).collect();
+        for piece in samples.chunks(3) {
+            blocks.extend_from_slice(piece);
+        }
+        assert_eq!(blocks.len(), 11);
+        assert_eq!(blocks.full.len(), 2);
+        // A full block is set aside, never grown: nothing captured is copied.
+        assert!(blocks.full.iter().all(|block| block.capacity() == 4));
+        assert_eq!(blocks.take(), samples);
+        assert_eq!(blocks.len(), 0);
+        assert!(blocks.take().is_empty());
+    }
+
+    #[test]
+    fn a_take_within_one_block_is_handed_over_without_a_copy() {
+        let mut blocks = Blocks::new(8);
+        blocks.extend_from_slice(&[1.0, 2.0, 3.0]);
+        let pointer = blocks.current.as_ptr();
+        let take = blocks.take();
+        assert_eq!(take, vec![1.0, 2.0, 3.0]);
+        assert_eq!(take.as_ptr(), pointer);
     }
 
     #[test]

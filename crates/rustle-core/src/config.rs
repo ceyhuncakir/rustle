@@ -42,8 +42,9 @@ pub fn config_path() -> PathBuf {
 
 /// Give the folders from when the app was called Flow their new names, once:
 /// the config, and the data with its gigabytes of models, which a rename
-/// moves at once. A folder whose new name exists already, or whose path is
-/// overridden, is left alone. Returns a note per folder moved or skipped.
+/// moves at once. A folder whose new name exists already, whose path is
+/// overridden, or that is some other app's `flow` is left alone. Returns a
+/// note per folder moved or skipped.
 pub fn migrate_from_flow() -> Vec<String> {
     let bases = [
         (std::env::var_os("RUSTLE_CONFIG_DIR").is_none(), dirs::config_dir()),
@@ -63,6 +64,10 @@ fn rename_flow_dir(base: &Path) -> Option<String> {
     if !old.is_dir() || new.exists() {
         return None;
     }
+    if !is_flows(&old) {
+        log::debug!("{} is not Flow's; leaving it alone", old.display());
+        return None;
+    }
     // A Flow that is still running keeps its engine lock; moving the folder
     // from under it would split the history between two places.
     if let Ok(lock) = std::fs::File::open(old.join("engine.lock")) {
@@ -74,6 +79,29 @@ fn rename_flow_dir(base: &Path) -> Option<String> {
         Ok(()) => format!("moved {} to {}", old.display(), new.display()),
         Err(err) => format!("could not move {} to {}: {err}", old.display(), new.display()),
     })
+}
+
+/// Whether `dir` holds Flow's files rather than another app's that is also
+/// called flow: a config with Flow's sections, its speech models, its
+/// dictation history or the setup wizard's mark.
+fn is_flows(dir: &Path) -> bool {
+    let config = std::fs::read_to_string(dir.join("config.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .is_some_and(|table| {
+            ["stt", "cleanup"].iter().any(|key| table.get(*key).is_some_and(|v| v.is_table()))
+        });
+    let models = crate::models::STT_MODELS.iter().any(|model| dir.join("models").join(model.id).is_dir());
+    config || models || dir.join("first-run-done").is_file() || has_dictations(&dir.join("history.db"))
+}
+
+fn has_dictations(path: &Path) -> bool {
+    use rusqlite::{Connection, OpenFlags};
+    let Ok(db) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    db.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dictation'", [], |_| Ok(()))
+        .is_ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -737,7 +765,7 @@ mod tests {
     fn flow_folders_get_the_new_name_once() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("flow/models")).unwrap();
-        std::fs::write(dir.path().join("flow/config.toml"), "x").unwrap();
+        std::fs::write(dir.path().join("flow/config.toml"), "[stt]\nmodel = \"x\"\n").unwrap();
         assert!(rename_flow_dir(dir.path()).unwrap().starts_with("moved"));
         assert!(dir.path().join("rustle/config.toml").is_file());
         assert!(dir.path().join("rustle/models").is_dir());
@@ -750,9 +778,49 @@ mod tests {
     }
 
     #[test]
+    fn another_apps_flow_folder_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let flow = dir.path().join("flow");
+        std::fs::create_dir_all(flow.join("models/llama")).unwrap();
+        std::fs::write(flow.join("config.toml"), "[window]\nwidth = 3\n").unwrap();
+        std::fs::write(flow.join("history.db"), "not even a database").unwrap();
+        assert_eq!(rename_flow_dir(dir.path()), None);
+        assert!(flow.join("config.toml").is_file());
+        assert!(!dir.path().join("rustle").exists());
+    }
+
+    #[test]
+    fn every_mark_of_flow_is_recognised() {
+        /// Leaves one mark of Flow in its folder.
+        type Mark = fn(&Path);
+        let marks: [(&str, Mark); 4] = [
+            ("config", |flow| {
+                std::fs::write(flow.join("config.toml"), "[cleanup]\nmodel = \"m\"\n").unwrap()
+            }),
+            ("models", |flow| {
+                std::fs::create_dir_all(flow.join("models").join(crate::models::DEFAULT_STT_MODEL)).unwrap()
+            }),
+            ("wizard", |flow| std::fs::write(flow.join("first-run-done"), "2026-01-01").unwrap()),
+            ("history", |flow| {
+                let db = rusqlite::Connection::open(flow.join("history.db")).unwrap();
+                db.execute_batch("CREATE TABLE dictation (id INTEGER PRIMARY KEY)").unwrap();
+            }),
+        ];
+        for (name, mark) in marks {
+            let dir = tempfile::tempdir().unwrap();
+            let flow = dir.path().join("flow");
+            std::fs::create_dir_all(&flow).unwrap();
+            mark(&flow);
+            assert!(rename_flow_dir(dir.path()).is_some_and(|note| note.starts_with("moved")), "{name}");
+            assert!(dir.path().join("rustle").is_dir(), "{name}");
+        }
+    }
+
+    #[test]
     fn a_running_flow_keeps_its_folder() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("flow")).unwrap();
+        std::fs::write(dir.path().join("flow/first-run-done"), "2026-01-01").unwrap();
         let held = std::fs::File::create(dir.path().join("flow/engine.lock")).unwrap();
         held.lock().unwrap();
         let note = rename_flow_dir(dir.path()).unwrap();

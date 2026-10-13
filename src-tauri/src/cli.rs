@@ -177,7 +177,10 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 let editor = std::env::var("VISUAL")
                     .or_else(|_| std::env::var("EDITOR"))
                     .unwrap_or_else(|_| "vi".into());
-                std::process::Command::new(editor).arg(&path).status()?;
+                // `code --wait`: a program and its arguments.
+                let mut words = editor.split_whitespace();
+                let program = words.next().unwrap_or("vi");
+                std::process::Command::new(program).args(words).arg(&path).status()?;
             } else {
                 print!("{}", std::fs::read_to_string(&path)?);
             }
@@ -242,7 +245,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             }
             let backend: Arc<dyn rustle_core::backends::Backend> =
                 Arc::from(rustle_core::backends::build_backend(&config.cleanup));
-            let (terms, style) = Learner::new(backend).refresh(&history, config.learning.max_terms)?;
+            let learned = Learner::new(backend.clone()).refresh(&history, config.learning.max_terms);
+            if !engine_elsewhere() {
+                backend.unload();
+            }
+            let (terms, style) = learned?;
             println!("learned {} terms; style: {}", terms.len(), if style.is_empty() { "-" } else { &style });
             Ok(())
         }
@@ -304,7 +311,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 Ok(())
             }
         },
-        Command::Eval { filter } => crate::eval::run(&config, filter.as_deref()),
+        Command::Eval { filter } => {
+            let result = crate::eval::run(&config, filter.as_deref());
+            unload_after_one_shot(&config);
+            result
+        }
         Command::WatchOllama { .. } | Command::Hotkey { .. } => unreachable!("handled in run"),
     }
 }
@@ -384,7 +395,7 @@ fn gpu(config: &Config) {
 }
 
 fn doctor(config: &Config) -> anyhow::Result<()> {
-    let checks = crate::doctor::run(config, &[], false);
+    let checks = crate::doctor::run(config, &[], engine_elsewhere());
     let mut failed = 0;
     for c in &checks {
         println!("{} {:<22} {}", if c.ok { "ok  " } else { "FAIL" }, c.name, c.detail);
@@ -409,8 +420,29 @@ fn dictate(seconds: f32) -> anyhow::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut engine =
         crate::host::assemble(&shared, &config, overlay, backends.focus, backends.injector, tx, rx)?;
-    engine.prepare()?;
-    eprintln!("Speak now ({seconds:.0}s)...");
-    println!("{}", engine.dictate_once(seconds)?);
-    Ok(())
+    let result = engine.prepare().and_then(|()| {
+        eprintln!("Speak now ({seconds:.0}s)...");
+        println!("{}", engine.dictate_once(seconds)?);
+        Ok(())
+    });
+    unload_after_one_shot(&config);
+    result
+}
+
+/// Whether a Rustle engine runs in another process (the app, or the
+/// background service): it holds `engine.lock` for as long as it runs.
+fn engine_elsewhere() -> bool {
+    let path = config::data_dir().join("engine.lock");
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) else { return false };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
+/// A one-shot command loaded the local cleanup model; hand it back rather
+/// than leave it in memory for `keep_alive` (an hour by default). Unless a
+/// running Rustle dictates with it: unloading would make its next sentence
+/// wait for a cold model. A no-op for hosted providers.
+fn unload_after_one_shot(config: &Config) {
+    if !engine_elsewhere() {
+        rustle_core::cleanup::build_cleaner(&config.cleanup).unload();
+    }
 }

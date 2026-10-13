@@ -341,6 +341,12 @@ pub trait Cleaner: Send + Sync {
     fn available(&self) -> (bool, String);
     /// Seconds spent loading the model; 0.0 when there is nothing to warm.
     fn warm_up(&self) -> f64 {
+        self.warm_up_while(&|| true)
+    }
+    /// [`warm_up`](Self::warm_up), for a caller that may be gone by the time
+    /// the model is in: `wanted` is asked then, and false leaves the model
+    /// to unload itself shortly instead of staying for the keep-alive.
+    fn warm_up_while(&self, _wanted: &dyn Fn() -> bool) -> f64 {
         0.0
     }
     fn unload(&self) {}
@@ -557,8 +563,8 @@ impl Cleaner for ModelCleaner {
     /// A cold local 14B costs about 40 seconds against 0.2 warm. Paying that
     /// when Rustle starts - which the user did deliberately - beats paying it
     /// on their first sentence. Hosted backends are always warm and return 0.
-    fn warm_up(&self) -> f64 {
-        let elapsed = self.backend.warm_up();
+    fn warm_up_while(&self, wanted: &dyn Fn() -> bool) -> f64 {
+        let elapsed = self.backend.warm_up_while(wanted);
         if elapsed != 0.0 {
             info!("warmed up {} in {elapsed:.1}s", self.config.model);
         }

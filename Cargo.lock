@@ -5261,6 +5261,8 @@ dependencies = [
  "rustle-core",
  "tempfile",
  "thiserror 2.0.20",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "zbus",
 ]
 

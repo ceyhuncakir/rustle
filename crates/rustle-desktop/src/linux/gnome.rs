@@ -185,8 +185,15 @@ impl Focus for GnomeIsland {
 }
 
 impl Injector for GnomeIsland {
+    /// When the extension cannot be reached (it is reloading, or the Shell
+    /// is wedged) the text goes on the clipboard from here instead, like
+    /// every other injector leaves it after a failed paste, so the
+    /// dictation is still there to paste by hand.
     fn insert(&self, text: &str) -> Result<(), DesktopError> {
-        self.proxy.insert_text(text).map_err(|e: zbus::Error| DesktopError::Failed(e.to_string()))
+        self.proxy.insert_text(text).map_err(|e: zbus::Error| {
+            crate::clipboard::copy_text(text.to_string());
+            DesktopError::Failed(e.to_string())
+        })
     }
 }
 

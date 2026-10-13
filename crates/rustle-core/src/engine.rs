@@ -30,6 +30,10 @@ const ERROR_HIDE_AFTER: Duration = Duration::from_millis(2500);
 /// The pill fades itself out; the engine follows, so the overlay window and
 /// the tray do not go on believing a paste is still under way.
 const SUCCESS_HIDE_AFTER: Duration = Duration::from_millis(1400);
+/// The longest take. A tap latches the recording on, and one forgotten would
+/// otherwise go on recording - into memory - until the next tap; past this
+/// the take ends as if released.
+const MAX_TAKE: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -188,6 +192,11 @@ pub struct Engine {
     hide_seq: u64,
     since_refresh: Arc<AtomicU32>,
     learning_now: Arc<AtomicBool>,
+    /// [`MAX_TAKE`], shorter in tests.
+    max_take: Duration,
+    /// Set once [`Engine::run`] has ended, for the cleanup model's warm-up
+    /// still under way on its own thread.
+    stopped: Arc<AtomicBool>,
 }
 
 impl Engine {
@@ -225,6 +234,8 @@ impl Engine {
             hide_seq: 0,
             since_refresh: Arc::new(AtomicU32::new(0)),
             learning_now: Arc::new(AtomicBool::new(false)),
+            max_take: MAX_TAKE,
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -232,8 +243,46 @@ impl Engine {
 
     /// Load and warm both models. Done once at startup so the first dictation
     /// is as fast as the hundredth; a cold cleanup model costs seconds and
-    /// nobody should meet that mid-sentence.
+    /// nobody should meet that mid-sentence. Blocks until both are ready,
+    /// for `rustle dictate`, which records straight afterwards.
     pub fn prepare(&mut self) -> anyhow::Result<()> {
+        if self.load()? {
+            self.cleaner.warm_up();
+        }
+        Ok(())
+    }
+
+    /// Load the recogniser, then [`run`](Self::run), warming the cleanup
+    /// model on a thread of its own meanwhile.
+    ///
+    /// A cold local model takes up to a minute to load. Warming it on the
+    /// engine thread would leave the hotkey unanswered all that time, and
+    /// a shutdown too: Quit froze, and systemd killed the service before it
+    /// could unload anything. Off the engine thread a shutdown is handled at
+    /// once. The model can then still be loading, which Ollama does not let
+    /// anyone cut short or unload; the warm-up asks for it with a keep-alive
+    /// of a minute and only extends that while the engine still runs (see
+    /// `OllamaBackend::warm_up_while`), so Ollama soon lets it go by itself.
+    pub fn serve(&mut self) -> anyhow::Result<()> {
+        let warm = self.load()?;
+        // What queued during the load goes first. A shutdown among it means
+        // the cleanup model is not wanted at all.
+        while let Ok(event) = self.rx.try_recv() {
+            if !self.handle(event) {
+                self.wind_down();
+                return Ok(());
+            }
+        }
+        if warm {
+            self.warm_in_background();
+        }
+        self.run();
+        Ok(())
+    }
+
+    /// Check the cleanup model and load the recogniser and the learned
+    /// profile. True when the cleanup model is there to warm up.
+    fn load(&mut self) -> anyhow::Result<bool> {
         let (ok, why) = self.cleaner.available();
         if !ok {
             warn!("cleanup unavailable ({why}) - transcripts will paste raw");
@@ -242,15 +291,24 @@ impl Engine {
         info!("loading {} ...", self.config.stt.model);
         self.transcriber.load()?;
 
-        if ok {
-            self.cleaner.warm_up();
-        }
-
         if let Some(history) = &self.history {
             info!("learning on: {} dictations stored", history.count().unwrap_or(0));
             self.reload_profile();
         }
-        Ok(())
+        Ok(ok)
+    }
+
+    /// A dictation meanwhile waits for the load inside Ollama, and pastes
+    /// raw if that outlasts the cleanup timeout.
+    fn warm_in_background(&self) {
+        let cleaner = Arc::clone(&self.cleaner);
+        let stopped = Arc::clone(&self.stopped);
+        let spawned = std::thread::Builder::new().name("rustle-warm-up".into()).spawn(move || {
+            cleaner.warm_up_while(&|| !stopped.load(Ordering::SeqCst));
+        });
+        if let Err(err) = spawned {
+            warn!("could not warm the cleanup model up: {err}");
+        }
     }
 
     /// Hand the cleaner whatever profile the store holds now.
@@ -269,6 +327,11 @@ impl Engine {
                 break;
             }
         }
+        self.wind_down();
+    }
+
+    fn wind_down(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
         if self.recorder.recording() {
             self.recorder.stop();
         }
@@ -339,6 +402,14 @@ impl Engine {
     // -- level meter, from the recorder's thread via the channel -------------
 
     fn on_level(&mut self, level: f32) {
+        // Levels arrive all through a take, silence included, so they are
+        // the clock for its limit.
+        if self.recorder.recording() && self.started_at.elapsed() >= self.max_take {
+            warn!("ending the take at the {}-minute limit", self.max_take.as_secs() / 60);
+            self.hold.reset();
+            self.on_released();
+            return;
+        }
         let now = Instant::now();
         if now.duration_since(self.last_level) < LEVEL_INTERVAL {
             return;
@@ -391,14 +462,20 @@ impl Engine {
         }
 
         let audio = self.recorder.stop();
-        let seconds = audio.len() as f32 / self.config.audio.sample_rate as f32;
-        info!("captured {seconds:.2}s");
-
-        if seconds < self.config.audio.min_seconds {
+        if self.too_short(&audio) {
             self.fail("Too short");
             return;
         }
+        self.process_take(audio);
+    }
 
+    fn too_short(&self, audio: &[f32]) -> bool {
+        let seconds = audio.len() as f32 / self.config.audio.sample_rate as f32;
+        info!("captured {seconds:.2}s");
+        seconds < self.config.audio.min_seconds
+    }
+
+    fn process_take(&mut self, audio: Vec<f32>) {
         self.busy = true;
         self.processing_at = Instant::now();
         self.overlay.set_state(State::Thinking);
@@ -431,18 +508,24 @@ impl Engine {
         self.overlay.set_state(State::Hidden);
     }
 
-    /// Only a take still recording is lost. Once released, the stream is
-    /// closed and the audio already in hand, so a late report from it is no
-    /// reason to throw that take away.
+    /// The take ends where the stream broke, and what was captured until
+    /// then is still a dictation: only one too short to be one is lost.
+    /// After the release the stream is closed and the audio already in hand,
+    /// so a late report from it is no reason to throw that take away.
     fn on_mic_error(&mut self, message: &str) {
         if !self.recorder.recording() {
             debug!("microphone error outside a take: {message}");
             return;
         }
-        self.recorder.stop();
+        let audio = self.recorder.stop();
         self.hold.reset();
         let message: String = message.chars().take(80).collect();
-        self.fail(&format!("Microphone: {message}"));
+        if self.too_short(&audio) {
+            self.fail(&format!("Microphone: {message}"));
+            return;
+        }
+        warn!("microphone failed mid-take ({message}); keeping what was captured");
+        self.process_take(audio);
     }
 
     // -- worker thread ---------------------------------------------------------
@@ -503,7 +586,10 @@ impl Engine {
         self.overlay.set_state(State::Inserting);
         if let Err(err) = self.injector.insert(&text) {
             warn!("insert failed: {err}");
-            self.fail("Could not paste");
+            // Not lost: every injector leaves the text on the clipboard when
+            // the paste itself fails, and it is stored like any other.
+            self.fail("Could not paste - the text is on the clipboard");
+            self.remember(text);
             return;
         }
 
@@ -595,6 +681,8 @@ impl Engine {
         let length = Duration::try_from_secs_f32(seconds)
             .map_err(|_| anyhow::anyhow!("cannot record for {seconds} seconds"))?;
         self.on_pressed("manual");
+        // on_pressed has put the reason on the island and in the log.
+        anyhow::ensure!(self.recorder.recording(), "the microphone did not start");
         std::thread::sleep(length);
 
         let audio = self.recorder.stop();
@@ -677,10 +765,14 @@ mod test_support {
         }
     }
 
+    /// What was pasted; with the flag set, every paste fails.
     #[derive(Default)]
-    pub struct FakeInjector(pub Mutex<Vec<String>>);
+    pub struct FakeInjector(pub Mutex<Vec<String>>, pub AtomicBool);
     impl Injector for FakeInjector {
         fn insert(&self, text: &str) -> Result<(), DesktopError> {
+            if self.1.load(Ordering::SeqCst) {
+                return Err(DesktopError::Failed("no paste helper".into()));
+            }
             self.0.lock().unwrap().push(text.to_string());
             Ok(())
         }
@@ -689,6 +781,8 @@ mod test_support {
     pub struct FakeRecorder {
         pub take: Vec<f32>,
         pub recording: bool,
+        /// Every start fails, as with no microphone.
+        pub broken: bool,
         pub starts: Arc<AtomicU32>,
         pub stops: Arc<AtomicU32>,
     }
@@ -697,6 +791,7 @@ mod test_support {
             Self {
                 take: vec![0.1; (16000.0 * seconds) as usize],
                 recording: false,
+                broken: false,
                 starts: Arc::new(AtomicU32::new(0)),
                 stops: Arc::new(AtomicU32::new(0)),
             }
@@ -704,6 +799,9 @@ mod test_support {
     }
     impl Recorder for FakeRecorder {
         fn start(&mut self) -> anyhow::Result<()> {
+            if self.broken {
+                anyhow::bail!("no microphone");
+            }
             self.recording = true;
             self.starts.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -730,7 +828,7 @@ mod test_support {
             *self.permits.lock().unwrap() += permits;
             self.opened.notify_all();
         }
-        fn pass(&self) {
+        pub fn pass(&self) {
             // Bounded, so a broken test fails instead of hanging.
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut permits = self.permits.lock().unwrap();
@@ -976,9 +1074,7 @@ mod tests {
         let take = 16000 * 2;
         r.engine.recorder = Box::new(FakeRecorder {
             take: (0..take).map(|i| if i < take / 2 { 0.0 } else { 0.1 }).collect(),
-            recording: false,
-            starts: Arc::new(AtomicU32::new(0)),
-            stops: Arc::new(AtomicU32::new(0)),
+            ..FakeRecorder::seconds(0.0)
         });
         r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
         r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
@@ -1135,7 +1231,8 @@ mod tests {
 
     #[test]
     fn a_microphone_error_mid_take_stops_and_says_so() {
-        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        // Too little was captured to be a dictation.
+        let mut r = rig(0.1, FakeTranscriber::saying("x"));
         r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
         r.engine.handle(Event::MicError("device unplugged".into()));
         assert!(!r.engine.recorder.recording());
@@ -1149,6 +1246,58 @@ mod tests {
         past_debounce();
         r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
         assert_eq!(r.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_microphone_error_mid_take_keeps_what_was_captured() {
+        // Two minutes into a dictation the USB microphone is pulled: what was
+        // said until then is still pasted.
+        let mut r = rig(2.0, FakeTranscriber::saying("said before it broke"));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        r.engine.handle(Event::MicError("device unplugged".into()));
+        assert!(!r.engine.recorder.recording());
+        assert!(r.engine.busy);
+        settle(&mut r.engine);
+        assert_eq!(*r.injector.0.lock().unwrap(), vec!["said before it broke".to_string()]);
+        // The shortcut is not left latched.
+        past_debounce();
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert_eq!(r.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_paste_keeps_the_dictation() {
+        let mut r = rig(2.0, FakeTranscriber::saying("hello there"));
+        let dir = tempfile::tempdir().unwrap();
+        let history = Arc::new(History::open(dir.path().join("history.db")).unwrap());
+        r.engine.history = Some(history.clone());
+        r.injector.1.store(true, Ordering::SeqCst);
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Pressed));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Released));
+        settle(&mut r.engine);
+        assert_eq!(r.overlay.states.lock().unwrap().last(), Some(&State::Error));
+        let shown = r.overlay.texts.lock().unwrap().last().cloned();
+        assert_eq!(shown.as_deref(), Some("Could not paste - the text is on the clipboard"));
+        // Stored like a pasted one, so it can be found again.
+        wait_for(|| history.count().unwrap() == 1);
+    }
+
+    #[test]
+    fn a_forgotten_take_ends_at_the_limit() {
+        let mut r = rig(2.0, FakeTranscriber::saying("a very long take"));
+        r.engine.max_take = Duration::ZERO;
+        // A tap latches it on.
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Up));
+        assert!(r.engine.recorder.recording());
+        r.engine.handle(Event::Level(0.2));
+        assert!(!r.engine.recorder.recording());
+        settle(&mut r.engine);
+        assert_eq!(*r.injector.0.lock().unwrap(), vec!["a very long take".to_string()]);
+        // And the next tap starts a new take rather than stopping a stale one.
+        past_debounce();
+        r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
+        assert!(r.engine.recorder.recording());
     }
 
     #[test]
@@ -1227,6 +1376,82 @@ mod tests {
         next_result(&mut r.engine);
         r.engine.handle(Event::Hotkey(HotkeyEvent::Down));
         assert_eq!(r.starts.load(Ordering::SeqCst), 2, "the next press starts a take");
+    }
+
+    #[test]
+    fn dictate_once_says_when_the_microphone_did_not_start() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        r.engine.recorder = Box::new(FakeRecorder { broken: true, ..FakeRecorder::seconds(2.0) });
+        let err = r.engine.dictate_once(0.01).unwrap_err();
+        assert!(err.to_string().contains("microphone"), "{err}");
+        assert!(r.transcriber.calls.lock().unwrap().is_empty());
+    }
+
+    /// A cleaner whose warm-up holds until the test lets it through, then
+    /// reports whether the model was still wanted.
+    struct SlowWarmUp {
+        started: Mutex<Option<mpsc::Sender<()>>>,
+        gate: Arc<Gate>,
+        wanted: Mutex<Option<bool>>,
+    }
+    impl Cleaner for SlowWarmUp {
+        fn clean(&self, raw: &str, _context: &FocusContext) -> String {
+            raw.to_string()
+        }
+        fn available(&self) -> (bool, String) {
+            (true, "slow".into())
+        }
+        fn warm_up_while(&self, wanted: &dyn Fn() -> bool) -> f64 {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            self.gate.pass();
+            *self.wanted.lock().unwrap() = Some(wanted());
+            1.0
+        }
+    }
+
+    #[test]
+    fn a_shutdown_does_not_wait_for_the_cleanup_model_to_load() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        let (started_tx, started) = mpsc::channel();
+        let gate = Arc::new(Gate::default());
+        let cleaner = Arc::new(SlowWarmUp {
+            started: Mutex::new(Some(started_tx)),
+            gate: gate.clone(),
+            wanted: Mutex::new(None),
+        });
+        r.engine.cleaner = cleaner.clone() as Arc<dyn Cleaner>;
+        let tx = r.engine.tx.clone();
+        let mut engine = r.engine;
+        let (done_tx, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            engine.serve().unwrap();
+            let _ = done_tx.send(());
+        });
+        started.recv_timeout(Duration::from_secs(5)).expect("the warm-up began");
+        tx.send(Event::Shutdown).unwrap();
+        // Still loading, yet the engine is already done.
+        done.recv_timeout(Duration::from_secs(2)).expect("the engine stopped while the model loaded");
+        assert_eq!(*cleaner.wanted.lock().unwrap(), None);
+        gate.open(1);
+        wait_for(|| cleaner.wanted.lock().unwrap().is_some());
+        assert_eq!(*cleaner.wanted.lock().unwrap(), Some(false));
+    }
+
+    #[test]
+    fn a_shutdown_during_the_load_skips_the_warm_up() {
+        let mut r = rig(2.0, FakeTranscriber::saying("x"));
+        let gate = Arc::new(Gate::default());
+        let cleaner =
+            Arc::new(SlowWarmUp { started: Mutex::new(None), gate: gate.clone(), wanted: Mutex::new(None) });
+        r.engine.cleaner = cleaner.clone() as Arc<dyn Cleaner>;
+        r.engine.tx.send(Event::Shutdown).unwrap();
+        gate.open(1);
+        r.engine.serve().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(*cleaner.wanted.lock().unwrap(), None, "no warm-up was started");
+        assert_eq!(r.overlay.states.lock().unwrap().last(), Some(&State::Hidden));
     }
 
     #[test]

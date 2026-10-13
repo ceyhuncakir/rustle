@@ -75,11 +75,7 @@ impl LinuxEnv {
         };
         #[cfg(target_os = "linux")]
         {
-            let looks_like_gnome = this
-                .current_desktop
-                .as_deref()
-                .map(|d| d.to_ascii_lowercase().contains("gnome"))
-                .unwrap_or(false);
+            let looks_like_gnome = this.current_desktop.as_deref().is_some_and(gnome_shell);
             if looks_like_gnome || this.rustle_desktop.as_deref() == Some("gnome") {
                 this.extension_present = crate::linux::gnome::extension_present();
             }
@@ -101,7 +97,7 @@ pub fn detect_linux(env: &LinuxEnv) -> Session {
     }
 
     let desktop = env.current_desktop.as_deref().unwrap_or("").to_ascii_lowercase();
-    let gnome = desktop.contains("gnome");
+    let gnome = gnome_shell(&desktop);
     let wayland = env.wayland_display.is_some() || env.session_type.as_deref() == Some("wayland");
     if !wayland {
         // The extension runs on GNOME's X11 session too and grabs the same
@@ -118,12 +114,22 @@ pub fn detect_linux(env: &LinuxEnv) -> Session {
     if desktop.contains("kde") || desktop.contains("plasma") {
         return Session::KdeWayland;
     }
-    for name in ["hyprland", "sway", "river", "niri", "wayfire", "cosmic", "labwc"] {
+    // Budgie 10.10 runs on labwc.
+    for name in ["hyprland", "sway", "river", "niri", "wayfire", "cosmic", "labwc", "budgie"] {
         if desktop.contains(name) {
             return Session::LayerShellWayland;
         }
     }
     Session::OtherWayland
+}
+
+/// Whether `XDG_CURRENT_DESKTOP` names GNOME Shell. Budgie and GNOME
+/// Flashback list GNOME too ("Budgie:GNOME"), for its settings and apps,
+/// but run a shell of their own that cannot load the extension.
+fn gnome_shell(desktop: &str) -> bool {
+    let entries: Vec<String> = desktop.split(':').map(|d| d.trim().to_ascii_lowercase()).collect();
+    let other_shell = entries.iter().any(|d| d == "budgie" || d == "gnome-flashback");
+    !other_shell && entries.iter().any(|d| d.contains("gnome"))
 }
 
 #[cfg(test)]
@@ -181,6 +187,21 @@ mod tests {
         assert_eq!(detect_linux(&env("wayland", "Hyprland", true)), Session::LayerShellWayland);
         assert_eq!(detect_linux(&env("wayland", "sway", true)), Session::LayerShellWayland);
         assert_eq!(detect_linux(&env("wayland", "Weston", true)), Session::OtherWayland);
+    }
+
+    #[test]
+    fn desktops_that_borrow_gnomes_name_are_not_gnome_shell() {
+        assert_eq!(detect_linux(&env("wayland", "Budgie:GNOME", true)), Session::LayerShellWayland);
+        assert_eq!(detect_linux(&env("x11", "Budgie:GNOME", false)), Session::X11);
+        assert_eq!(detect_linux(&env("x11", "GNOME-Flashback:GNOME", false)), Session::X11);
+        assert_eq!(
+            detect_linux(&env("wayland", "GNOME-Classic:GNOME", true)),
+            Session::GnomeWayland { extension: true }
+        );
+        assert_eq!(
+            detect_linux(&env("wayland", "pop:GNOME", true)),
+            Session::GnomeWayland { extension: true }
+        );
     }
 
     #[test]

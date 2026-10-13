@@ -46,11 +46,13 @@ const LANGUAGES: readonly Choice[] = [
 ];
 
 export function CleanupSection() {
-  const { config, save } = useSettings();
+  const { config, save, latest } = useSettings();
   const providers = useAsync(() => api.listProviders());
   const provider = config.cleanup.backend;
   const spec = providers.data?.find((p) => p.key === provider) ?? null;
-  const apiKey = useApiKey(provider);
+  // Ollama and "none" need no key, and asking the keyring can pop up its
+  // unlock prompt.
+  const apiKey = useApiKey(spec?.needs_api_key ? provider : null);
 
   const models = useProviderModels(provider, spec?.suggested_models ?? [], config.cleanup.model);
   const { fetched, fetching } = models;
@@ -65,12 +67,17 @@ export function CleanupSection() {
         ? "Set a key to load the full list"
         : "";
 
+  // Both writes are asked for in the same tick and decided from the latest
+  // choice, so arrowing through the list can't leave one provider's model
+  // with another provider.
   const chooseProvider = async (key: string) => {
     const next = providers.data?.find((p) => p.key === key);
-    await save("cleanup", "backend", key);
-    if (next?.default_model && !next.suggested_models.includes(config.cleanup.model)) {
-      await save("cleanup", "model", next.default_model, false);
+    const model = latest().cleanup.model;
+    const writes = [save("cleanup", "backend", key)];
+    if (next?.default_model && !next.suggested_models.includes(model)) {
+      writes.push(save("cleanup", "model", next.default_model, false));
     }
+    await Promise.all(writes);
   };
 
   const providerOptions = (providers.data ?? []).map((p) => ({ value: p.key, label: p.label }));
@@ -78,13 +85,26 @@ export function CleanupSection() {
 
   return (
     <Group title="Cleanup" description="The model that turns the transcript into what you meant">
-      <Row title="Provider" htmlFor="provider" subtitle={apiKey.fromEnv ? `Using the key from ${apiKey.source}` : spec?.note ?? ""}>
+      <Row
+        title="Provider"
+        htmlFor="provider"
+        subtitle={
+          providers.error ? (
+            <span className="text-danger">Could not list the providers: {providers.error}</span>
+          ) : apiKey.fromEnv ? (
+            `Using the key from ${apiKey.source}`
+          ) : (
+            (spec?.note ?? "")
+          )
+        }
+      >
         <Select id="provider" value={provider} options={providerOptions} onChange={(v) => detach(chooseProvider(v))} />
       </Row>
 
       {spec?.has_base_url && (
-        <Row title="API address" subtitle="The OpenAI-compatible base URL, ending in /v1" stacked>
+        <Row title="API address" htmlFor="base-url" subtitle="The OpenAI-compatible base URL, ending in /v1" stacked>
           <TextField
+            id="base-url"
             value={config.cleanup.base_url}
             placeholder="https://api.groq.com/openai/v1"
             onApply={async (v) => {
@@ -114,11 +134,13 @@ export function CleanupSection() {
       {showKey && (
         <Row
           title={`${spec?.label ?? "API"} API key`}
+          htmlFor="api-key"
           subtitle={apiKey.source === "keyring" ? "Stored in your keyring. Enter a new one to replace it, or clear it to remove." : "Kept in your keyring, never in config.toml"}
           stacked
           below={apiKey.error && <p className="selectable mt-2 text-[12.5px] text-danger">{apiKey.error}</p>}
         >
           <TextField
+            id="api-key"
             key={provider}
             value=""
             secret

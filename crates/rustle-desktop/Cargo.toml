@@ -18,6 +18,13 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 active-win-pos-rs = "0.11"
 thiserror.workspace = true
 
+# The focused window on wlroots-style compositors (sway, river, niri, labwc,
+# Wayfire), which active-win-pos-rs cannot see. The versions arboard's
+# wayland-data-control already pulls in.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31.15"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 env_logger.workspace = true

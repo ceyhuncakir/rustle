@@ -6,6 +6,8 @@ export interface WizardContextValue {
   /** Write one key and mirror it locally. Toasts and rethrows on failure. */
   save: (section: ConfigSection, key: string, value: ConfigValue) => Promise<boolean>;
   patch: (section: ConfigSection, key: string, value: ConfigValue) => void;
+  /** The config with every write asked for applied, landed or not; see ConfigStore.latest. */
+  latest: () => Config;
   /** The shortcut dictation listens for, as the engine reports it; the configured one until then. */
   hotkey: string;
   /** The engine, which the wizard starts at the Shortcut step; null until known. */
@@ -14,7 +16,10 @@ export interface WizardContextValue {
   starting: boolean;
   refreshStatus: () => Promise<void>;
   permissions: Permission[];
-  refreshPermissions: () => Promise<void>;
+  /** Read the list again; resolves to it, or null when it could not be read. */
+  refreshPermissions: () => Promise<Permission[] | null>;
+  /** Whether the configured recognition model is on disk; null until known. */
+  modelReady: boolean | null;
 }
 
 export const WizardContext = createContext<WizardContextValue | null>(null);

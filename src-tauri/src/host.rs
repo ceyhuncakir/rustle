@@ -55,7 +55,9 @@ pub struct Shared {
 
 pub struct Running {
     pub tx: Sender<Event>,
-    pub thread: JoinHandle<()>,
+    /// Ends true once the engine has run until told to stop, false when its
+    /// models failed to load.
+    pub thread: JoinHandle<bool>,
     /// The desktop's hotkey, and on Linux the control socket beside it.
     pub hotkeys: Vec<Box<dyn Hotkey>>,
     pub shortcut: Option<String>,
@@ -321,22 +323,23 @@ fn launch(shared: &Shared, app: Option<&AppHandle>) -> anyhow::Result<()> {
     // does not leave it in video memory.
     let watchdog = crate::watchdog::Watchdog::spawn(&config.cleanup);
 
+    // The cleanup model warms up beside the engine rather than before it, so
+    // stopping (Quit, a signal, a restart) never waits on a cold model; see
+    // `Engine::serve`. Only loading the recogniser holds a stop up.
     let spawned = std::thread::Builder::new().name("rustle-engine".into()).spawn({
         let app = app.cloned();
         let last_error = shared.last_error.clone();
         move || {
-            if let Err(err) = engine.prepare() {
-                log::error!("engine failed to prepare: {err:#}");
-                *last_error.lock().unwrap() = Some(format!("{err:#}"));
-                if let Some(app) = &app {
-                    crate::windows::notify(app, "Rustle could not load its models", &format!("{err:#}"));
-                    // The thread ends here, so the tray should stop saying "ready".
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || crate::tray::sync_toggle(&handle));
-                }
-                return;
+            let Err(err) = engine.serve() else { return true };
+            log::error!("engine failed to prepare: {err:#}");
+            *last_error.lock().unwrap() = Some(format!("{err:#}"));
+            if let Some(app) = &app {
+                crate::windows::notify(app, "Rustle could not load its models", &format!("{err:#}"));
+                // The thread ends here, so the tray should stop saying "ready".
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || crate::tray::sync_toggle(&handle));
             }
-            engine.run();
+            false
         }
     });
     let thread = match spawned {

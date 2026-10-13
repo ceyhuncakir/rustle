@@ -3,7 +3,7 @@
 // can be developed and screenshotted without the native app.
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import { listen as tauriListen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 export type Unlisten = () => void;
 export type Handler<T> = (payload: T) => void;
@@ -31,9 +31,15 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
   return m.invoke<T>(cmd, args);
 }
 
+/**
+ * Hear `event` when it is broadcast or addressed to this window. The global
+ * `listen` would also hear what Rust addresses to the other windows: the
+ * level goes to the overlay, the wizard and the settings window separately,
+ * and the island would draw each one three times.
+ */
 export async function listen<T>(event: string, handler: Handler<T>): Promise<Unlisten> {
   if (isTauri) {
-    return tauriListen<T>(event, (e) => handler(e.payload));
+    return getCurrentWebviewWindow().listen<T>(event, (e) => handler(e.payload));
   }
   const m = await getMock();
   return m.listen<T>(event, handler);

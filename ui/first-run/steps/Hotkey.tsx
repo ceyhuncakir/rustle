@@ -42,7 +42,12 @@ export function HotkeyStep() {
       />
       <Group>
         <Row title="Dictation shortcut" subtitle={subtitle}>
-          <HotkeyRecorder value={hotkey} onSave={saveHotkey} down={running && !starting ? down : undefined} />
+          {/* Where the desktop or the compositor picks the key, the row below says how. */}
+          {(status?.hotkey_owner ?? "rustle") === "rustle" ? (
+            <HotkeyRecorder value={hotkey} onSave={saveHotkey} down={running && !starting ? down : undefined} />
+          ) : (
+            <span className="text-[12.5px] text-fg-2">Set by your desktop, below</span>
+          )}
         </Row>
       </Group>
       <PermissionRows scope="hotkey" />

@@ -22,7 +22,7 @@ export function MicrophoneStep() {
       <StepHeader title="Microphone" lead="Pick the input Rustle should record from, then press Test and say something: the bars move with your voice." />
       <label className="mb-4 flex items-center justify-between gap-4">
         <span className="text-[14px] font-medium">Input</span>
-        <Select label="Input device" value={config.audio.device} options={deviceOptions(devices.data)} onChange={(v) => detach(save("audio", "device", v))} />
+        <Select label="Input device" value={config.audio.device} options={deviceOptions(devices.data, config.audio.device)} onChange={(v) => detach(save("audio", "device", v))} />
       </label>
       <div className="flex justify-center py-2">
         <LevelMeter className="w-[268px]" />

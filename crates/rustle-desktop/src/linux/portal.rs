@@ -34,6 +34,9 @@ const DESKTOP: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const SHORTCUTS: &str = "org.freedesktop.portal.GlobalShortcuts";
 const REQUEST: &str = "org.freedesktop.portal.Request";
+const SESSION: &str = "org.freedesktop.portal.Session";
+/// Where the portal puts its session objects.
+const SESSIONS: &str = "/org/freedesktop/portal/desktop/session";
 const REGISTRY: &str = "org.freedesktop.host.portal.Registry";
 
 /// Who Rustle is to the portal: the bundle identifier, and the name of the
@@ -55,11 +58,29 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const REPEAT_GAP: Duration = Duration::from_millis(2500);
 /// How long a newly written desktop entry may take to reach the portal.
 const ENTRY_WAIT: Duration = Duration::from_secs(3);
+/// After the desktop dropped the session, how long to wait before asking
+/// again, so a portal that is restarting has come back.
+const RESTART_GRACE: Duration = Duration::from_secs(1);
 
 /// The GlobalShortcuts version the desktop's portal offers, or `None` when
 /// it offers none (xdg-desktop-portal-wlr, GNOME before 48, no portal).
-/// Cheap and silent: no session, no dialog.
+/// Cheap and silent: no session, no dialog. The settings window's status
+/// poll asks every few seconds, so the answer is kept for a while rather
+/// than opening a bus connection each time.
 pub fn version() -> Option<u32> {
+    const KEEP: Duration = Duration::from_secs(30);
+    static ASKED: Mutex<Option<(Instant, Option<u32>)>> = Mutex::new(None);
+    if let Some((at, version)) = *lock(&ASKED) {
+        if at.elapsed() < KEEP {
+            return version;
+        }
+    }
+    let version = ask_version();
+    *lock(&ASKED) = Some((Instant::now(), version));
+    version
+}
+
+fn ask_version() -> Option<u32> {
     let conn =
         zbus::blocking::connection::Builder::session().ok()?.method_timeout(CALL_TIMEOUT).build().ok()?;
     let reply = conn
@@ -212,7 +233,10 @@ struct Session {
 /// The engine's hotkey on a desktop whose portal offers global shortcuts.
 pub struct PortalHotkey {
     wanted: Vec<Wanted>,
-    conn: Option<Connection>,
+    /// The connection the worker is on. It starts over on a new one when
+    /// the desktop drops the session, so [`Hotkey::stop`] closes whichever
+    /// is current.
+    conn: Arc<Mutex<Option<Connection>>>,
     stopped: Arc<AtomicBool>,
 }
 
@@ -230,34 +254,41 @@ impl PortalHotkey {
             Wanted { id: DICTATE, description: "Dictate (hold to talk, tap to toggle)", trigger },
             Wanted { id: CANCEL, description: "Cancel dictation", trigger: Some(CANCEL_TRIGGER.into()) },
         ];
-        PortalHotkey { wanted, conn: None, stopped: Arc::default() }
+        PortalHotkey { wanted, conn: Arc::default(), stopped: Arc::default() }
     }
+}
+
+/// A connection of its own: the app id is registered per connection, and
+/// must be before any other portal call on it.
+fn connect() -> zbus::Result<Connection> {
+    zbus::blocking::connection::Builder::session()?.method_timeout(CALL_TIMEOUT).build()
 }
 
 impl Hotkey for PortalHotkey {
     fn start(&mut self, sink: Sender<Event>) -> Result<(), DesktopError> {
-        let fail = |e: zbus::Error| DesktopError::Unavailable(format!("session bus: {e}"));
-        // A connection of its own: the app id is registered per connection,
-        // and must be before any other portal call on it.
-        let conn = zbus::blocking::connection::Builder::session()
-            .map_err(fail)?
-            .method_timeout(CALL_TIMEOUT)
-            .build()
-            .map_err(fail)?;
-        self.stopped.store(false, Ordering::SeqCst);
+        let conn = connect().map_err(|e| DesktopError::Unavailable(format!("session bus: {e}")))?;
+        // A flag per start: a worker from before a stop, still waiting to
+        // start over, must see its own stop and not take this one's place.
+        self.stopped = Arc::default();
         set_state(PortalState::Binding);
-        let (worker_conn, wanted, stopped) = (conn.clone(), self.wanted.clone(), self.stopped.clone());
+        *lock(&self.conn) = Some(conn.clone());
+        let (wanted, stopped, slot) = (self.wanted.clone(), self.stopped.clone(), self.conn.clone());
         std::thread::Builder::new()
             .name("rustle-portal".into())
-            .spawn(move || run(worker_conn, wanted, sink, stopped))
+            .spawn(move || run(conn, wanted, sink, stopped, slot))
             .map_err(|e| DesktopError::Unavailable(format!("portal thread: {e}")))?;
-        self.conn = Some(conn);
         Ok(())
     }
 
     fn stop(&mut self) {
-        let Some(conn) = self.conn.take() else { return };
-        self.stopped.store(true, Ordering::SeqCst);
+        // Under the slot's lock, so a worker starting over cannot put a new
+        // connection in after this took the old one.
+        let conn = {
+            let mut slot = lock(&self.conn);
+            self.stopped.store(true, Ordering::SeqCst);
+            slot.take()
+        };
+        let Some(conn) = conn else { return };
         lock(&ACTIVE).take();
         set_state(PortalState::Off);
         // Closing the connection ends the session (the portal drops the
@@ -276,31 +307,153 @@ impl Drop for PortalHotkey {
 }
 
 /// The worker: register, open a session, bind, then relay key events until
-/// the connection closes.
-fn run(conn: Connection, wanted: Vec<Wanted>, sink: Sender<Event>, stopped: Arc<AtomicBool>) {
-    register(&conn);
-    let signals = match subscribe(&conn) {
+/// the connection closes. The desktop can drop the shortcuts without a
+/// word, by closing the session or by its portal leaving the bus (a
+/// restart, an upgrade, a crash); [`watch`] notices, closes the connection,
+/// and the worker starts over on a new one, as at startup.
+fn run(
+    mut conn: Connection,
+    wanted: Vec<Wanted>,
+    sink: Sender<Event>,
+    stopped: Arc<AtomicBool>,
+    slot: Arc<Mutex<Option<Connection>>>,
+) {
+    while let Served::Lost = serve(&conn, &wanted, &sink, &stopped) {
+        // Give a restarting portal a moment; asking starts it again if
+        // nothing else does.
+        std::thread::sleep(RESTART_GRACE);
+        conn = match connect() {
+            Ok(conn) => conn,
+            Err(err) => {
+                return fail_unless_stopped(&stopped, format!("could not reach the portal again: {err}"))
+            }
+        };
+        let mut current = lock(&slot);
+        if stopped.load(Ordering::SeqCst) {
+            drop(current);
+            let _ = conn.close();
+            return;
+        }
+        *current = Some(conn.clone());
+    }
+    debug!("portal listener ended");
+}
+
+enum Served {
+    /// The desktop dropped the session; start over.
+    Lost,
+    /// Stopped, or the portal could not be used at all.
+    Over,
+}
+
+/// One connection's worth of [`run`].
+fn serve(conn: &Connection, wanted: &[Wanted], sink: &Sender<Event>, stopped: &AtomicBool) -> Served {
+    register(conn);
+    let signals = match subscribe(conn) {
         Ok(signals) => signals,
-        Err(err) => return fail_unless_stopped(&stopped, format!("could not listen to the portal: {err}")),
-    };
-    let handle = match create_session(&conn) {
-        Ok(handle) => handle,
         Err(err) => {
-            return fail_unless_stopped(&stopped, format!("could not open a shortcuts session: {err}"))
+            fail_unless_stopped(stopped, format!("could not listen to the portal: {err}"));
+            return Served::Over;
         }
     };
-    let session = Arc::new(Session { conn, handle, wanted });
+    let handle = match create_session(conn) {
+        Ok(handle) => handle,
+        Err(err) => {
+            fail_unless_stopped(stopped, format!("could not open a shortcuts session: {err}"));
+            return Served::Over;
+        }
+    };
+    let session = Arc::new(Session { conn: conn.clone(), handle, wanted: wanted.to_vec() });
     {
         let mut active = lock(&ACTIVE);
         if stopped.load(Ordering::SeqCst) {
-            return;
+            return Served::Over;
         }
         *active = Some(session.clone());
     }
     info!("portal shortcuts session {}", session.handle.as_str());
+    let lost = Arc::new(AtomicBool::new(false));
+    watch(conn, &lost);
     bind(&session);
-    listen(signals, &sink, &stopped);
-    debug!("portal listener ended");
+    listen(signals, sink, stopped);
+    if lost.load(Ordering::SeqCst) && !stopped.load(Ordering::SeqCst) {
+        Served::Lost
+    } else {
+        Served::Over
+    }
+}
+
+/// Watch for the desktop dropping the session behind Rustle's back: the
+/// portal closing it, or leaving the bus and taking every session with it.
+/// Either marks `lost` and closes the connection, which ends the listener
+/// and any request still waiting for an answer that will never come. Both
+/// watchers end with the connection.
+fn watch(conn: &Connection, lost: &Arc<AtomicBool>) {
+    match subscribe_closed(conn) {
+        Ok(closed) => {
+            let (conn, lost) = (conn.clone(), lost.clone());
+            spawn_watcher("rustle-portal-session", move || {
+                for message in closed {
+                    let Ok(message) = message else { continue };
+                    let Some(path) = message.header().path().map(|p| p.to_string()) else { continue };
+                    if is_current(&path) {
+                        return give_up(conn, &lost, "the desktop closed the shortcuts session");
+                    }
+                }
+            });
+        }
+        Err(err) => debug!("cannot watch the portal session: {err}"),
+    }
+    let owner = match portal_owner(conn) {
+        Ok(owner) => owner,
+        Err(err) => return debug!("cannot tell which process is the portal: {err}"),
+    };
+    match subscribe_owner(conn) {
+        Ok(changes) => {
+            let (conn, lost) = (conn.clone(), lost.clone());
+            spawn_watcher("rustle-portal-owner", move || {
+                for message in changes {
+                    let Ok(message) = message else { continue };
+                    let Ok((_, old, _)) = message.body().deserialize::<(String, String, String)>() else {
+                        continue;
+                    };
+                    if portal_left(&owner, &old) {
+                        return give_up(conn, &lost, "the desktop portal left the session bus");
+                    }
+                }
+            });
+        }
+        Err(err) => debug!("cannot watch the portal: {err}"),
+    }
+}
+
+fn spawn_watcher(name: &str, watch: impl FnOnce() + Send + 'static) {
+    if let Err(err) = std::thread::Builder::new().name(name.into()).spawn(watch) {
+        warn!("could not watch the portal: {err}");
+    }
+}
+
+/// Whether `path` is the live session's.
+fn is_current(path: &str) -> bool {
+    lock(&ACTIVE).as_ref().is_some_and(|a| a.handle.as_str() == path)
+}
+
+/// Whether a NameOwnerChanged whose old owner is `old` is the portal Rustle
+/// talks to leaving: gone, or replaced by a new one that knows none of its
+/// sessions. The portal it starts by asking again appears with no old owner.
+fn portal_left(ours: &str, old: &str) -> bool {
+    !ours.is_empty() && old == ours
+}
+
+fn give_up(conn: Connection, lost: &AtomicBool, why: &str) {
+    warn!("{why}; asking for the shortcuts again");
+    lost.store(true, Ordering::SeqCst);
+    if let Some(session) = lock(&ACTIVE).clone() {
+        publish(&session, PortalState::Failed(format!("{why}; asking again")));
+    }
+    if let Err(err) = conn.close() {
+        debug!("closing the portal connection: {err}");
+    }
 }
 
 fn fail_unless_stopped(stopped: &AtomicBool, message: String) {
@@ -499,6 +652,36 @@ fn subscribe(conn: &Connection) -> zbus::Result<MessageIterator> {
     let rule =
         MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(SHORTCUTS)?.path(PATH)?.build();
     MessageIterator::for_match_rule(rule, conn, Some(64))
+}
+
+/// Closed, on any session; [`watch`] picks out the live one.
+fn subscribe_closed(conn: &Connection) -> zbus::Result<MessageIterator> {
+    let rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface(SESSION)?
+        .member("Closed")?
+        .path_namespace(SESSIONS)?
+        .build();
+    MessageIterator::for_match_rule(rule, conn, Some(8))
+}
+
+/// The portal's bus name changing hands.
+fn subscribe_owner(conn: &Connection) -> zbus::Result<MessageIterator> {
+    let rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.freedesktop.DBus")?
+        .interface("org.freedesktop.DBus")?
+        .member("NameOwnerChanged")?
+        .arg(0, DESKTOP)?
+        .build();
+    MessageIterator::for_match_rule(rule, conn, Some(8))
+}
+
+/// The unique name of the portal process this connection talks to.
+fn portal_owner(conn: &Connection) -> zbus::Result<String> {
+    let dbus = zbus::blocking::fdo::DBusProxy::new(conn)?;
+    let owner = dbus.get_name_owner(zbus::names::BusName::try_from(DESKTOP)?)?;
+    Ok(owner.to_string())
 }
 
 fn token() -> String {
@@ -820,6 +1003,18 @@ mod tests {
         assert_eq!(keys.activated(CANCEL, t), Some(HotkeyEvent::Cancel));
         assert_eq!(keys.deactivated(CANCEL), None);
         assert_eq!(keys.activated("other", t), None);
+    }
+
+    #[test]
+    fn only_the_portal_in_use_leaving_counts() {
+        // Ours went away, or was replaced by a new one.
+        assert!(portal_left(":1.42", ":1.42"));
+        // A portal appearing, say the one asking again started.
+        assert!(!portal_left(":1.42", ""));
+        // Some other owner changing hands.
+        assert!(!portal_left(":1.42", ":1.7"));
+        // Never knew which process it was: nothing to compare.
+        assert!(!portal_left("", ""));
     }
 
     #[test]

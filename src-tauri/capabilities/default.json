@@ -1,17 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What Rustle's own windows may call.",
+  "description": "What Rustle's own windows may call: its commands and events. The pages use no plugin from JavaScript; Rust drives the opener, autostart, notifications and the windows themselves.",
   "windows": ["overlay", "settings", "first-run"],
-  "permissions": [
-    "core:default",
-    "core:window:allow-set-size",
-    "core:window:allow-set-position",
-    "core:window:allow-show",
-    "core:window:allow-hide",
-    "core:event:default",
-    "opener:default",
-    "autostart:default",
-    "notification:default"
-  ]
+  "permissions": ["core:default", "core:event:default"]
 }

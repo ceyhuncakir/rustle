@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentType } from "react";
 import { api, type Permission, type Status } from "../shared/api";
-import { describe, useInterval } from "../shared/hooks";
+import { describe, useAsync, useEvent, useInterval } from "../shared/hooks";
 import { LoadFailed, useConfigStore } from "../shared/prefs";
 import { Button, ToastProvider, useToast } from "../shared/ui";
 import { WizardContext } from "./context";
@@ -60,20 +60,31 @@ function Wizard() {
     return i >= 0 ? i : 0;
   });
   const [finishing, setFinishing] = useState(false);
+  // Why Rustle's own state could not be read, shown in the footer: without
+  // it a broken backend looks like a wizard with nothing to say.
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [permissionsError, setPermissionsError] = useState<string | null>(null);
 
   const refreshStatus = async () => {
     try {
       setStatus(await api.getStatus());
+      setStatusError(null);
     } catch (err) {
       console.warn("get_status failed", err);
+      setStatusError(describe(err));
     }
   };
 
   const refreshPermissions = async () => {
     try {
-      setPermissions(await api.getPermissions());
+      const list = await api.getPermissions();
+      setPermissions(list);
+      setPermissionsError(null);
+      return list;
     } catch (err) {
       console.warn("get_permissions failed", err);
+      setPermissionsError(describe(err));
+      return null;
     }
   };
 
@@ -85,6 +96,16 @@ function Wizard() {
   const step = STEPS[index]!;
   const last = index === STEPS.length - 1;
   const engineStep = ENGINE_STEPS.has(step.id);
+
+  // Finishing without the recognition model would close the wizard on an
+  // engine that dies loading it. Looked at again on every step, and when a
+  // download ends.
+  const sttModels = useAsync(() => api.listSttModels(), [store.config?.stt.model, store.config?.stt.provider, step.id]);
+  useEvent("rustle:download", (ev) => {
+    if (ev.done) void sttModels.reload();
+  });
+  const configured = store.config ? sttModels.data?.find((m) => m.id === store.config?.stt.model) : undefined;
+  const modelReady = sttModels.data ? configured?.downloaded === true : null;
 
   onEngineStep.current = engineStep;
 
@@ -145,12 +166,14 @@ function Wizard() {
         config: store.config,
         save: store.save,
         patch: store.patch,
+        latest: () => store.latest() ?? store.config!,
         hotkey: status?.hotkey || store.config.desktop.hotkey,
         status,
         starting,
         refreshStatus,
         permissions,
         refreshPermissions,
+        modelReady,
       }}
     >
       <div className="flex h-screen min-h-[520px]">
@@ -162,15 +185,21 @@ function Wizard() {
             </div>
           </main>
           <footer className="flex items-center justify-between gap-3 border-t border-line px-10 py-4">
-            <span className="text-[12.5px] text-fg-3">
-              Step {index + 1} of {STEPS.length}
-            </span>
+            {statusError || permissionsError ? (
+              <span role="alert" className="selectable min-w-0 text-[12.5px] text-danger">
+                Could not ask Rustle for its {statusError ? "status" : "permissions"}: {statusError ?? permissionsError}
+              </span>
+            ) : (
+              <span className="text-[12.5px] text-fg-3">
+                Step {index + 1} of {STEPS.length}
+              </span>
+            )}
             <div className="flex gap-2">
               <Button variant="flat" disabled={index === 0} onClick={() => setIndex((i) => Math.max(0, i - 1))}>
                 Back
               </Button>
               {last ? (
-                <Button variant="suggested" busy={finishing} onClick={() => void finish()}>
+                <Button variant="suggested" busy={finishing} disabled={modelReady === false} onClick={() => void finish()}>
                   Start using Rustle
                 </Button>
               ) : (

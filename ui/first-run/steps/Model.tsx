@@ -82,6 +82,11 @@ export function ModelStep() {
           );
         })}
         {models.loading && <li className="px-4 py-3 text-[13px] text-fg-2">Loading…</li>}
+        {models.error && !models.loading && (
+          <li className="px-4 py-3">
+            <Outcome ok={false}>Could not list the models: {models.error}</Outcome>
+          </li>
+        )}
       </ul>
 
       {(downloading || (selected && !selected.downloaded) || downloadError) && (

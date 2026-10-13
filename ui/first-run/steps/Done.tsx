@@ -5,8 +5,17 @@ import { useWizard } from "../context";
 import { Outcome, StepHeader } from "./StepHeader";
 
 export function DoneStep() {
-  const { hotkey, config, status, starting } = useWizard();
+  const { hotkey, config, status, starting, modelReady } = useWizard();
   const [text, setText] = useState("");
+
+  if (modelReady === false) {
+    return (
+      <div>
+        <StepHeader title="Almost there" />
+        <Outcome ok={false}>The recognition model is not downloaded yet, so Rustle can't dictate. Download it on the Recognition step, then come back.</Outcome>
+      </div>
+    );
+  }
 
   return (
     <div>

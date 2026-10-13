@@ -161,11 +161,17 @@ pub fn run_headless() -> i32 {
         let _ = tx.send(rustle_core::engine::Event::Shutdown);
     });
     // The engine unloads the cleanup model on its way out; then the GPU.
-    let _ = running.thread.join();
+    let served = running.thread.join().unwrap_or(false);
     if let Some(watchdog) = running.watchdog {
         watchdog.stand_down();
     }
     host::release_gpu(&shared);
+    if !served {
+        // The models did not load (the reason is in the log above). Failing
+        // lets systemd try again, which helps when the cause was passing -
+        // a GPU driver still settling at login, say.
+        return 1;
+    }
     info!("stopped");
     0
 }

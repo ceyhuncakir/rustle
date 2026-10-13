@@ -2,7 +2,7 @@
 // config store, and the controls that wrap one Rust command each.
 
 import { useEffect, useRef, useState } from "react";
-import { api, type Config, type ConfigSection, type ConfigValue, type DownloadEvent, type GpuReport, type InputDevice } from "./api";
+import { api, type Config, type ConfigSection, type ConfigValue, type DownloadEvent, type GpuReport, type InputDevice, type Permission } from "./api";
 import { describe, useAsync, useEvent } from "./hooks";
 import { Button, Progress, Switch, formatBytes, useToast, type Choice, type Option } from "./ui";
 
@@ -16,8 +16,23 @@ export interface ConfigStore {
   /**
    * Write one key and mirror it locally. Resolves to whether the engine must
    * restart for it to apply. Toasts and rethrows on failure.
+   *
+   * Writes reach config.toml one at a time, in the order they were asked
+   * for: Tauri runs commands side by side, and two quick changes of provider
+   * would otherwise land backend and model in any order.
    */
   save: (section: ConfigSection, key: string, value: ConfigValue) => Promise<boolean>;
+  /**
+   * The config with every write asked for so far applied, including those
+   * still on their way. A choice that depends on another value (a provider
+   * and its model) reads this, not `config`, which only has the writes that
+   * have landed, and asks for both writes in the same tick.
+   */
+  latest: () => Config | null;
+}
+
+function withValue(c: Config, section: ConfigSection, key: string, value: ConfigValue): Config {
+  return { ...c, [section]: { ...c[section], [key]: value } };
 }
 
 /** Load config.toml once and keep a local copy in step with every write. */
@@ -25,28 +40,46 @@ export function useConfigStore(): ConfigStore {
   const toast = useToast();
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const intended = useRef<Config | null>(null);
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+
+  const load = () =>
+    api.getConfig().then(
+      (c) => {
+        intended.current = c;
+        setConfig(c);
+      },
+      (err) => setError(describe(err)),
+    );
 
   useEffect(() => {
-    api.getConfig().then(setConfig, (err) => setError(describe(err)));
+    void load();
   }, []);
 
   const patch: ConfigStore["patch"] = (section, key, value) => {
-    setConfig((c) => (c ? { ...c, [section]: { ...c[section], [key]: value } } : c));
+    if (intended.current) intended.current = withValue(intended.current, section, key, value);
+    setConfig((c) => (c ? withValue(c, section, key, value) : c));
   };
 
   const save: ConfigStore["save"] = async (section, key, value) => {
+    if (intended.current) intended.current = withValue(intended.current, section, key, value);
+    const write = queue.current.then(() => api.setConfigValue(section, key, value));
+    queue.current = write.catch(() => {});
     let restart: boolean;
     try {
-      restart = await api.setConfigValue(section, key, value);
+      restart = await write;
     } catch (err) {
       toast(`Could not save: ${describe(err)}`);
+      // What was asked for no longer says what is on disk; read it again.
+      void load();
       throw err;
     }
-    patch(section, key, value);
+    // Writes land in order, so the last one asked for is the last applied.
+    setConfig((c) => (c ? withValue(c, section, key, value) : c));
     return restart === true;
   };
 
-  return { config, error, patch, save };
+  return { config, error, patch, save, latest: () => intended.current };
 }
 
 /** The page's "could not load" screen; the caller supplies the padding. */
@@ -74,11 +107,26 @@ export function useApiKey(provider: string | null) {
   const toast = useToast();
   const [source, setSource] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The keyring can be slow; an answer about a provider the user has since
+  // left must not show beside the new one.
+  const asked = useRef(0);
 
-  const load = (p: string) => api.getKeySource(p).then(setSource, () => setSource(""));
+  const load = (p: string) => {
+    const id = ++asked.current;
+    return api.getKeySource(p).then(
+      (s) => {
+        if (id === asked.current) setSource(s);
+      },
+      () => {
+        if (id === asked.current) setSource("");
+      },
+    );
+  };
 
   useEffect(() => {
     setError(null);
+    setSource("");
+    asked.current += 1;
     if (provider !== null) void load(provider);
   }, [provider]);
 
@@ -123,7 +171,11 @@ export function useProviderModels(provider: string, suggested: readonly string[]
   const refresh = async () => {
     const id = ++asked.current;
     setFetched(null);
-    if (provider === "none") return;
+    // A fetch still out for the last provider will not clear it any more.
+    if (provider === "none") {
+      setFetching(false);
+      return;
+    }
     setFetching(true);
     try {
       const found = await api.listProviderModels(provider);
@@ -279,6 +331,64 @@ export function DownloadProgress({ event, className }: { event: DownloadEvent; c
       </div>
     </div>
   );
+}
+
+// -- permissions ---------------------------------------------------------------
+
+/**
+ * The button beside each permission Rustle cannot simply ask the OS for. The
+ * GNOME extension is installed by Rustle and only runs after the next login;
+ * the paste helper is installed by the user, so its button just looks again.
+ * Anything else asks Rust to request it.
+ */
+const PERMISSION_ACTIONS: Record<string, string> = {
+  "hotkey-gnome-extension": "Install",
+  "paste-tool": "Check again",
+};
+
+/** Granted once the user logs out and back in. */
+const NEEDS_LOGIN = new Set(["hotkey-gnome-extension"]);
+
+/** Nothing to request: the user installs it, the button only looks again. */
+const CHECK_ONLY = new Set(["paste-tool"]);
+
+/**
+ * Request a permission, then look at the list again whatever came of it: a
+ * request that failed can still find the thing in place (a key binding
+ * pressed meanwhile, a helper installed), and "Check again" only looks.
+ * `refresh` resolves to the new list, or null when it could not be read.
+ */
+export function usePermissionGrant(refresh: () => Promise<Permission[] | null>) {
+  const toast = useToast();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [awaitingLogin, setAwaitingLogin] = useState<ReadonlySet<string>>(new Set());
+
+  const grant = async (id: string) => {
+    setBusy(id);
+    let failure: string | null = null;
+    try {
+      if (!CHECK_ONLY.has(id)) await api.requestPermission(id);
+      if (NEEDS_LOGIN.has(id)) {
+        setAwaitingLogin((s) => new Set(s).add(id));
+        toast("Installed. Log out and back in to finish.");
+      }
+    } catch (err) {
+      failure = describe(err);
+    }
+    const now = (await refresh())?.find((p) => p.id === id);
+    setBusy(null);
+    if (now?.granted) return;
+    if (failure) toast(`Could not ${NEEDS_LOGIN.has(id) ? "install" : "request"} it: ${failure}`);
+    else if (CHECK_ONLY.has(id)) toast(`Still not found: ${now?.help ?? "install it, then check again"}`);
+  };
+
+  return {
+    busy,
+    grant,
+    /** Installed, and waiting for the next login to take effect. */
+    pending: (p: Permission) => !p.granted && awaitingLogin.has(p.id),
+    actionLabel: (id: string) => PERMISSION_ACTIONS[id] ?? "Grant",
+  };
 }
 
 // -- desktop -----------------------------------------------------------------

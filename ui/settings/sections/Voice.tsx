@@ -1,5 +1,5 @@
 import { api, type ComputeReport, type GpuReport } from "../../shared/api";
-import { detach, useAsync, useInterval } from "../../shared/hooks";
+import { describe, detach, useAsync, useInterval } from "../../shared/hooks";
 import { COMPUTE_CHOICES, DownloadProgress, computePlan, deviceOptions, formatMegabytes, providerChoice, useModelDownload } from "../../shared/prefs";
 import { Button, ChoiceRow, Group, Row, Select, descriptionOf, useToast, type Option } from "../../shared/ui";
 import { useSettings } from "../context";
@@ -16,7 +16,7 @@ function computeSubtitle(report: ComputeReport | null, gpu: GpuReport | null, re
 }
 
 export function VoiceSection() {
-  const { config, save } = useSettings();
+  const { config, status, save, refreshStatus } = useSettings();
   const toast = useToast();
   // Which files count as downloaded depends on where recognition runs.
   const models = useAsync(() => api.listSttModels(), [config.stt.provider]);
@@ -29,9 +29,18 @@ export function VoiceSection() {
 
   const selected = models.data?.find((m) => m.id === config.stt.model) ?? null;
   const download = useModelDownload({
-    onDone: () => {
-      toast("Model downloaded");
+    onDone: (id) => {
       void models.reload();
+      // Dictation that is on died for want of this model, or runs another
+      // one; it picks the files up only when it starts again.
+      if (status?.enabled && id === config.stt.model) {
+        toast("Model downloaded. Restarting Rustle…");
+        api
+          .restartEngine()
+          .then(refreshStatus, (err) => toast(`Could not restart: ${describe(err)}`));
+      } else {
+        toast("Model downloaded");
+      }
     },
     onError: (message) => toast(`Download failed: ${message}`),
   });

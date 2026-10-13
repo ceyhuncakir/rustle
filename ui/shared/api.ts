@@ -76,9 +76,19 @@ export type ConfigValue = boolean | number | string | string[];
 export interface Status {
   /** False when stopped, and when the engine died (see `error`). */
   running: boolean;
+  /** Dictation is switched on, though its engine may have died since (see `error`). */
+  enabled: boolean;
   state: string;
   /** The effective dictation shortcut in the plugin's spelling ("Ctrl+Alt+Space"), on every desktop. */
   hotkey: string;
+  /**
+   * Who sets the shortcut: Rustle (record one here), the desktop (its
+   * settings pick the key, through the portal) or the compositor (its key
+   * bindings run `rustle hotkey`).
+   */
+  hotkey_owner: "rustle" | "desktop" | "compositor";
+  /** What to do instead of recording a shortcut, when Rustle doesn't own it. */
+  hotkey_help: string | null;
   version: string;
   /** A saved setting only applies once the engine restarts. */
   needs_restart: boolean;

@@ -15,8 +15,12 @@
 const TERMINALS: &[&str] = &[
     "alacritty",
     "blackbox",
+    "contour",
     "cool-retro-term",
+    "cosmic-term",
+    "cosmicterm",
     "deepin-terminal",
+    "dev.warp.warp",
     "foot",
     "footclient",
     "ghostty",
@@ -34,12 +38,15 @@ const TERMINALS: &[&str] = &[
     "ptyxis",
     "qterminal",
     "rio",
+    "roxterm",
+    "sakura",
     "st",
     "st-256color",
     "terminator",
     "terminology",
     "tilda",
     "tilix",
+    "warp-terminal",
     "wezterm",
     "wezterm-gui",
     "xfce4-terminal",
@@ -60,11 +67,10 @@ pub(crate) fn is_terminal(name: &str) -> bool {
 /// on Wayland) and its process name, since some terminals run under an
 /// interpreter or a differently named server process.
 pub(crate) fn focused_is_terminal() -> bool {
-    let Ok(win) = active_win_pos_rs::get_active_window() else {
+    let Some(win) = crate::generic::focused_window() else {
         return false;
     };
-    let process = win.process_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    is_terminal(&win.app_name) || is_terminal(&process)
+    is_terminal(&win.app) || is_terminal(&win.process)
 }
 
 #[cfg(test)]
@@ -90,6 +96,13 @@ mod tests {
             "com.gexperts.Tilix",
             "Terminator",
             " xfce4-terminal ",
+            "com.system76.CosmicTerm",
+            "cosmic-term",
+            "sakura",
+            "roxterm",
+            "org.contourterminal.Contour",
+            "dev.warp.Warp",
+            "warp-terminal",
         ] {
             assert!(is_terminal(name), "{name} should be a terminal");
         }
@@ -97,10 +110,28 @@ mod tests {
 
     #[test]
     fn leaves_other_apps_alone() {
-        for name in
-            ["", "firefox", "org.gnome.TextEditor", "code", "org.gnome.Settings", "python3.12", "steam"]
-        {
+        for name in [
+            "",
+            "firefox",
+            "org.gnome.TextEditor",
+            "code",
+            "org.gnome.Settings",
+            "python3.12",
+            "steam",
+            // GNOME's Warp sends files; only Warp the terminal is one.
+            "app.drey.Warp",
+        ] {
             assert!(!is_terminal(name), "{name} should not be a terminal");
         }
+    }
+
+    #[test]
+    fn the_shell_extension_knows_the_same_terminals() {
+        let js = include_str!("../../../extension/terminals.js");
+        let (_, list) = js.split_once("new Set([").expect("the list");
+        let (list, _) = list.split_once("])").expect("its end");
+        let names: Vec<&str> =
+            list.split(',').map(|n| n.trim().trim_matches('\'')).filter(|n| !n.is_empty()).collect();
+        assert_eq!(names, TERMINALS);
     }
 }

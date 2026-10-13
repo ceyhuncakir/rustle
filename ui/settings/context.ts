@@ -8,6 +8,8 @@ export interface SettingsContextValue {
   save: (section: ConfigSection, key: string, value: ConfigValue, toast?: string | false) => Promise<void>;
   /** Patch the local copy without writing (for values Rust wrote itself). */
   patch: (section: ConfigSection, key: string, value: ConfigValue) => void;
+  /** The config with every write asked for applied, landed or not; see ConfigStore.latest. */
+  latest: () => Config;
   refreshStatus: () => Promise<void>;
 }
 

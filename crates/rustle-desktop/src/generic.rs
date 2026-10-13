@@ -13,15 +13,50 @@ pub struct ActiveWindowFocus;
 
 impl Focus for ActiveWindowFocus {
     fn context(&self) -> Result<FocusContext, DesktopError> {
-        let Ok(win) = active_win_pos_rs::get_active_window() else {
+        let Some(win) = focused_window() else {
             return Ok(FocusContext::default());
         };
-        Ok(FocusContext {
-            app: win.app_name,
-            title: win.title,
-            role: win.process_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        })
+        Ok(FocusContext { app: win.app, title: win.title, role: win.process })
     }
+}
+
+/// The focused window: its class (the app id on Wayland), title and process
+/// name. The process is empty when only the compositor was asked.
+pub(crate) struct FocusedWindow {
+    pub app: String,
+    pub title: String,
+    pub process: String,
+}
+
+/// Which window has focus. On Wayland compositors that list their windows
+/// (sway, river, niri, labwc, Wayfire) the compositor is asked first:
+/// `active-win-pos-rs` only knows KWin and Hyprland there, and otherwise
+/// reads XWayland, which knows nothing of native Wayland windows.
+pub(crate) fn focused_window() -> Option<FocusedWindow> {
+    #[cfg(target_os = "linux")]
+    if ask_the_compositor() {
+        if let Some(toplevel) = crate::linux::toplevel::focused() {
+            return Some(FocusedWindow {
+                app: toplevel.app_id,
+                title: toplevel.title,
+                process: String::new(),
+            });
+        }
+    }
+    let win = active_win_pos_rs::get_active_window().ok()?;
+    let process = win.process_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Some(FocusedWindow { app: win.app_name, title: win.title, process })
+}
+
+/// Wayland, except where `active-win-pos-rs` asks the compositor itself
+/// (KWin, Hyprland). GNOME offers no window list, so the question costs one
+/// round trip there before falling through.
+#[cfg(target_os = "linux")]
+fn ask_the_compositor() -> bool {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty());
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
+    let native = desktop.contains("kde") || std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+    wayland && !native
 }
 
 /// Windows virtual-key code for V. Windows apps match shortcuts on virtual
