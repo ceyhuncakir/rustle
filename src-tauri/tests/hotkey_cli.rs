@@ -18,7 +18,7 @@ fn rustle(runtime: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
-fn every_command_reaches_a_running_flow() {
+fn every_command_reaches_a_running_rustle() {
     let runtime = tempfile::tempdir().unwrap();
     let (tx, rx) = mpsc::channel();
     let mut socket = ControlSocket::at(socket_path_in(runtime.path()));
@@ -40,7 +40,7 @@ fn every_command_reaches_a_running_flow() {
 }
 
 #[test]
-fn without_a_running_flow_it_says_so() {
+fn without_a_running_rustle_it_says_so() {
     let runtime = tempfile::tempdir().unwrap();
     let out = rustle(runtime.path(), &["hotkey", "toggle"]);
     assert_eq!(out.status.code(), Some(1));

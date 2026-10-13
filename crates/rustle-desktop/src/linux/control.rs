@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn nobody_listening_says_flow_is_not_running() {
+    fn nobody_listening_says_rustle_is_not_running() {
         let runtime = tempfile::tempdir().unwrap();
         let err = send_to(&socket_path_in(runtime.path()), "down").unwrap_err();
         assert!(matches!(err, SendError::NotRunning(_)), "{err}");

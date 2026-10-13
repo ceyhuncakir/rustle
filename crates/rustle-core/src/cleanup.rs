@@ -1286,17 +1286,17 @@ mod tests {
     #[test]
     fn prompt_parts_are_ordered_and_learned_terms_follow_the_dictionary() {
         let mut config = cfg("http://127.0.0.1:1");
-        config.dictionary = strings(&["Flow", "KVK"]);
+        config.dictionary = strings(&["Rustle", "KVK"]);
         config.app_rules.insert("Slack".into(), "Casual.".into());
         let cleaner = make_with(config);
-        cleaner.set_profile(strings(&["flow", "Ptyxis", "kvk", "Ptyxis"]), "Short and blunt.".into());
+        cleaner.set_profile(strings(&["rustle", "Ptyxis", "kvk", "Ptyxis"]), "Short and blunt.".into());
         let context = FocusContext { app: "Slack".into(), title: "#eng".into(), role: String::new() };
         assert_eq!(
             cleaner.build_prompt("hi", &context),
             "The text will be typed into: Slack - #eng\n\n\
              Style for this app: Casual.\n\n\
              How this person talks: Short and blunt. Keep that voice - it is theirs, not something to correct.\n\n\
-             Spell these correctly if they appear, even if the transcript garbles them: Flow, KVK, Ptyxis\n\n\
+             Spell these correctly if they appear, even if the transcript garbles them: Rustle, KVK, Ptyxis\n\n\
              Transcript:\nhi"
         );
         // Empty parts are left out entirely.
@@ -1310,7 +1310,7 @@ mod tests {
         // A cleared profile drops both learned parts again.
         cleaner.set_profile(Vec::new(), String::new());
         assert!(!cleaner.build_prompt("hi", &context).contains("How this person talks"));
-        assert!(cleaner.build_prompt("hi", &context).contains("garbles them: Flow, KVK\n"));
+        assert!(cleaner.build_prompt("hi", &context).contains("garbles them: Rustle, KVK\n"));
     }
 
     #[test]

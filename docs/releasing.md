@@ -21,11 +21,11 @@ and how installed copies find out about it.
    uses the version in `package.json`.)
 3. `.github/workflows/release.yml` builds, in parallel:
 
-   | Runner          | Output                                           |
-   | --------------- | ------------------------------------------------ |
-   | macOS (arm64)   | `Flow_<v>_aarch64.dmg`, `Flow_aarch64.app.tar.gz` |
-   | Ubuntu 24.04    | `.deb`, `.rpm`, `.AppImage`                       |
-   | Windows (x64)   | NSIS `-setup.exe`, `.msi`                         |
+   | Runner        | Output                                                |
+   | ------------- | ----------------------------------------------------- |
+   | macOS (arm64) | `Rustle_<v>_aarch64.dmg`, `Rustle_aarch64.app.tar.gz` |
+   | Ubuntu 24.04  | `.deb`, `.rpm`, `.AppImage`                           |
+   | Windows (x64) | NSIS `-setup.exe`, `.msi`                             |
 
    into a **draft** release named "Rustle v<version>". With the updater key
    set, each job also uploads `.sig` files and merges its platforms into the
@@ -165,7 +165,7 @@ What gets signed: the bundler signs inside out with the hardened runtime,
 the Dawn library first (`Contents/Frameworks/libwebgpu_dawn.dylib`, from
 `tauri.webgpu.macos.conf.json`; ONNX Runtime is linked statically), then
 `Rustle.app` with `src-tauri/Entitlements.plist`, then the DMG; it notarises
-and staples the app. The updater's `Flow_aarch64.app.tar.gz` is made from
+and staples the app. The updater's `Rustle_aarch64.app.tar.gz` is made from
 the signed app. Entitlements: `device.audio-input` (the microphone under the
 hardened runtime; `device.microphone` is its App Sandbox twin, harmless
 here) and `cs.allow-jit`. Rustle sends no Apple Events, so there is no

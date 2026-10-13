@@ -99,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn end_of_file_alone_means_flow_died() {
+    fn end_of_file_alone_means_rustle_died() {
         assert!(rustle_died(&b""[..]));
     }
 

@@ -21,7 +21,7 @@
  "daemon": {
   "provider": "auto",
   "onnxruntime": "1.22.0",
-  "python": "/home/ceyhun/Documents/flow/.venv/bin/python"
+  "python": "/home/ceyhun/Documents/rustle/.venv/bin/python"
  },
  "features_file": "features-en-01.json",
  "files": {

@@ -503,7 +503,7 @@ fn subscribe(conn: &Connection) -> zbus::Result<MessageIterator> {
 
 fn token() -> String {
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    format!("flow_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst))
+    format!("rustle_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst))
 }
 
 /// The path the portal will give the request made with `token`.

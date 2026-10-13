@@ -22,7 +22,7 @@ use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{sel, ClassType, MainThreadMarker};
 use objc2_app_kit::{NSPanel, NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask};
 
-const PANEL_CLASS: &CStr = c"FlowOverlayPanel";
+const PANEL_CLASS: &CStr = c"RustleOverlayPanel";
 
 /// Configure the overlay window once, while it is still hidden. Returns
 /// whether it became a real non-activating panel.

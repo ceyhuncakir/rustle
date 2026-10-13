@@ -60,7 +60,7 @@ const IFACE = `
   </interface>
 </node>`;
 
-export default class FlowExtension extends Extension {
+export default class RustleExtension extends Extension {
     enable() {
         this._enableDevMode();
         this._island = new Island();
