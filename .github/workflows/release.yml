@@ -148,6 +148,29 @@ jobs:
           [IO.File]::WriteAllText("src-tauri/tauri.windows-signing.conf.json", $config)
           "args=--config src-tauri/tauri.windows-signing.conf.json" >> $env:GITHUB_OUTPUT
 
+      # ort puts Dawn's DLLs into target/release as symlinks to its download
+      # cache. The installer takes them from there as resources, and Tauri's
+      # build script copies every resource over the file of the same name in
+      # target/release: through the symlink onto itself, which Windows
+      # refuses (os error 32). Running ort's build script first and swapping
+      # the links for real files avoids that: ort leaves a file that is
+      # already there alone, and Tauri skips a resource already in place.
+      - name: Dawn's DLLs as real files
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo check --release -p rustle-stt --features webgpu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($dll in "webgpu_dawn.dll", "dxcompiler.dll", "dxil.dll") {
+            $path = Join-Path $PWD "target/release/$dll"
+            $item = Get-Item $path -ErrorAction SilentlyContinue
+            if (-not $item -or -not $item.LinkType) { continue }
+            $bytes = [IO.File]::ReadAllBytes($path)
+            Remove-Item $path
+            [IO.File]::WriteAllBytes($path, $bytes)
+            Write-Output "$dll is a real file now"
+          }
+
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
