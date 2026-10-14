@@ -180,7 +180,9 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Rustle v__VERSION__"
-          releaseBody: "See the changelog for what changed."
+          # Also the update notes inside the app (latest.json), so it points at
+          # the release page, whose notes are written when it is published.
+          releaseBody: "What changed: https://github.com/ceyhuncakir/rustle/releases"
           releaseDraft: true
           prerelease: false
           # Each job merges its platforms into the release's latest.json.

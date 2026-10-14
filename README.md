@@ -26,19 +26,28 @@ Download the installer for your system from the
 |---|---|---|
 | **Windows** 10 and 11 | `Rustle_…_x64-setup.exe` | Installs for your user; no admin rights needed |
 | **macOS** 12 or later, Apple Silicon | `Rustle_…_aarch64.dmg` | Drag Rustle into Applications |
-| **Linux** | `Rustle_…_amd64.AppImage` | Runs anywhere; updates itself |
+| **Linux** | `Rustle_…_amd64.AppImage` | Any distribution new enough (below); updates itself |
 | Debian, Ubuntu | `Rustle_…_amd64.deb` | `sudo apt install ./Rustle_…_amd64.deb` |
-| Fedora, openSUSE | `Rustle-…x86_64.rpm` | `sudo dnf install ./Rustle-…x86_64.rpm` |
+| Fedora, openSUSE | `Rustle-…x86_64.rpm` | `sudo dnf install ./Rustle-…x86_64.rpm` (`zypper install` on openSUSE) |
 
 Intel Macs are not supported: the speech engine no longer ships for them.
 
+Linux needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40,
+openSUSE Tumbleweed, Arch, or anything later. `ldd --version` shows yours.
+On older systems, such as Ubuntu 22.04 or Debian 12, the package installs
+but Rustle does not start; [build it from source](#build-from-source)
+instead.
+
 <details>
-<summary><b>"Unidentified developer" or "Windows protected your PC"?</b></summary>
+<summary><b>macOS says Rustle "is damaged", or Windows says "Windows protected your PC"?</b></summary>
 
-Until the releases are code-signed, both systems warn the first time:
+The releases are not code-signed yet, so both systems object the first
+time:
 
-- **macOS:** right-click Rustle in Applications and choose **Open**, then
-  **Open** again. Or run `xattr -dr com.apple.quarantine /Applications/Rustle.app`.
+- **macOS:** after dragging Rustle into Applications, run
+  `xattr -dr com.apple.quarantine /Applications/Rustle.app` in Terminal,
+  then open it as usual. Without a signature macOS calls the download
+  damaged instead of offering to open it.
 - **Windows:** click **More info**, then **Run anyway**.
 
 </details>
@@ -72,8 +81,13 @@ runs under Voice, the cleanup provider and model under Cleanup.
 | Default shortcut | **Ctrl+Alt+Space**; **Option+D** on a Mac; **Super+D** on GNOME |
 | Cancel a take | **Super+Ctrl+Escape** on GNOME |
 
+A take stops on its own after ten minutes. If the text cannot be pasted,
+it is left on the clipboard for you to paste yourself.
+
 The tray icon opens the settings window, where you can change the
-shortcut, the microphone, the cleanup model and everything else.
+shortcut, the microphone, the cleanup model and everything else. Where the
+desktop owns the shortcut (KDE, Hyprland, sway and the like, below), the
+settings window says where to change it instead.
 
 ### Languages
 
@@ -151,7 +165,7 @@ and X11. Some desktops need a little help:
   both. The setup wizard installs it; log out and back in once so GNOME
   loads it.
 - **KDE and Hyprland** ask you to confirm the shortcut once, in their own
-  dialog.
+  dialog, and change it later in their own shortcut settings.
 - **sway, river and niri** have no shortcut dialog, so bind a key in the
   compositor to `rustle hotkey`:
 
@@ -171,14 +185,17 @@ and X11. Some desktops need a little help:
 
   `rustle hotkey cancel` drops the take in progress.
 - **On Wayland outside GNOME**, pasting needs `dotool`, or `ydotool` with
-  its `ydotoold` service running; the setup wizard checks for one. The
-  island needs `gtk-layer-shell` to float above windows
-  (`libgtk-layer-shell0` on Debian and Ubuntu) and falls back to a plain
-  window without it.
+  its `ydotoold` service running; the setup wizard checks for one. Both
+  press the key where V sits on a US keyboard, so with a layout that moves
+  it (Dvorak) use `dotool` and tell it your layout through
+  `DOTOOL_XKB_LAYOUT` and `DOTOOL_XKB_VARIANT` (for example `us` and
+  `dvorak`) in the environment Rustle starts in. The island needs
+  `gtk-layer-shell` to float above windows (`libgtk-layer-shell0` on Debian
+  and Ubuntu) and falls back to a plain window without it.
 
-On GNOME you can also run Rustle without any window, as a background
-service: `systemctl --user enable --now rustle`. Only one copy dictates at a
-time.
+Built from source, Rustle can also run on GNOME without any window, as a
+background service: `systemctl --user enable --now rustle`. The installers
+do not include the service. Only one copy dictates at a time.
 
 ### Build from source
 
@@ -188,8 +205,16 @@ scripts/install-app.sh      # builds and installs ~/.local/bin/rustle, the servi
 ```
 
 It needs [rustup](https://rustup.rs) (the Rust version in
-`rust-toolchain.toml` is fetched for you), Node.js with pnpm, and your
-distribution's WebKitGTK development packages. `--cuda` builds for NVIDIA's
+`rust-toolchain.toml` is fetched for you), Node.js with pnpm, and the
+development packages of WebKitGTK and a few system libraries. On Debian
+and Ubuntu:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+  libasound2-dev libdbus-1-dev libxdo-dev libxcb-ewmh-dev libxcb-randr0-dev pkg-config
+```
+
+Other distributions name the same libraries their own way. `--cuda` builds for NVIDIA's
 CUDA instead of WebGPU: slightly faster on recognition, but it needs CUDA 12
 and cuDNN 9. `--cpu` leaves the GPU out.
 
@@ -271,10 +296,15 @@ Rustle is new. What has been checked where:
 |---|---|
 | Linux, GNOME on Wayland | Used daily |
 | Linux, KDE, Hyprland, sway, X11 | The pieces are tested one by one; not yet a full session on each |
-| Windows | Built and tested automatically; not yet tried on a real machine |
-| macOS | Built and tested automatically; not yet tried on a real machine |
+| Windows | Installer built and tested automatically; not yet tried on a real machine |
+| macOS | Installer built and tested automatically; not yet tried on a real machine |
+
+If you try it on one of those, an issue saying how it went helps a lot.
 
 Known limits:
+
+- The Windows and macOS releases are not code-signed yet; see
+  [Install](#install) for getting past the warning.
 
 - Change-of-mind phrases ("no wait", "scratch that") are recognised in
   English and Dutch so far. In other languages the rest of the cleanup works
